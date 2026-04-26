@@ -11,6 +11,7 @@
 #define MSG_MAX 4096
 #define FRAME_HDR_SIZE 4
 #define WBUF_SIZE ((MSG_MAX + FRAME_HDR_SIZE) * 2)
+#define CLIENT_TIMEOUT_CHECK_INTERVAL_MS 100
 
 /* Default values for runtime config */
 #define CONFIG_DEFAULT_PORT 9999
