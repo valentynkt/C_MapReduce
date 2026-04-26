@@ -1,7 +1,3 @@
-
-#ifndef SERVER_H
-#define SERVER_H
-
 #include <stdbool.h>
 #include <sys/types.h>
 
@@ -17,6 +13,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
 master_t master;
 
 /* --- housekeeping --- */
@@ -78,16 +75,16 @@ static void on_shutdown(event_loop_t *el, int fd) {
 }
 
 /* --- lifecycle --- */
-static int shutdown_pipe_setup(int master_fd) {
+static int shutdown_pipe_setup(int listen_fd) {
   if (pipe(master.pipe) == -1) {
     perror("pipe");
-    close(master_fd);
+    close(listen_fd);
     return EXIT_FAILURE;
   }
 
   if (set_non_blocking(master.pipe[0]) == -1 ||
       set_non_blocking(master.pipe[1]) == -1) {
-    close(master_fd);
+    close(listen_fd);
     close(master.pipe[0]);
     close(master.pipe[1]);
     return EXIT_FAILURE;
@@ -95,77 +92,77 @@ static int shutdown_pipe_setup(int master_fd) {
   return EXIT_SUCCESS;
 }
 
-static int init_master(void) {
+static int master_init(void) {
   master.now_ms = now_ms();
   master.now_realtime_ms = realtime_ms();
-  // master.db = db_create(master.now_ms);
 
   setup_signal_handlers();
 
-  int master_fd =
+  int listen_fd =
       create_listener(master.config.port, master.config.tcp_backlog);
-  if (master_fd == -1)
+  if (listen_fd == -1)
     return EXIT_FAILURE;
 
-  printf("[bytekv] listening on port %d (hz=%d)\n", master.config.port,
-         master.config.hz);
+  printf("[mapreduce-master] listening on port %d (hz=%d)\n",
+         master.config.port, master.config.hz);
 
   if (el_init(&master.el) == -1) {
-    close(master_fd);
+    close(listen_fd);
     return EXIT_FAILURE;
   }
   master.el.before_sleep_proc = before_sleep;
 
-  if (shutdown_pipe_setup(master_fd) == EXIT_FAILURE) {
+  if (shutdown_pipe_setup(listen_fd) == EXIT_FAILURE) {
     return EXIT_FAILURE;
   }
 
-  master.master_fd = master_fd;
+  master.listen_fd = listen_fd;
 
   if (el_add(&master.el, master.pipe[0], on_shutdown) == -1)
     goto fail;
 
-  if (el_add(&master.el, master_fd, on_accept) == -1)
+  if (el_add(&master.el, listen_fd, on_accept) == -1)
     goto fail;
 
   return EXIT_SUCCESS;
 
 fail:
-  close(master_fd);
+  close(listen_fd);
   el_cleanup(&master.el);
   return EXIT_FAILURE;
 }
 
-static void shutdown_server(void) {
+static void master_shutdown(void) {
   for (int fd = 0; fd < MAX_FDS; fd++) {
-    if (master.workers[fd].active) {
+    if (master.clients[fd].active) {
       shutdown(fd, SHUT_WR);
       close(fd);
     }
   }
-  close(master.master_fd);
+  close(master.listen_fd);
   close(master.pipe[0]);
   close(master.pipe[1]);
   el_cleanup(&master.el);
-  // db_free(master.db);
 }
 
-int server_main(const char *configfile) {
-  init_server_config();
+int master_main(const char *configfile) {
+  master_config_init();
 
   if (configfile) {
     if (load_config(configfile) == -1)
       return EXIT_FAILURE;
   }
 
-  if (init_master() == EXIT_FAILURE) {
-    // db_free(master.db);
+  if (master_init() == EXIT_FAILURE) {
     return EXIT_FAILURE;
   }
 
   el_run(&master.el);
-  shutdown_server();
+  master_shutdown();
   return EXIT_SUCCESS;
 }
 
-#endif
+int main(int argc, char *argv[]) {
+  const char *configfile = (argc >= 2) ? argv[1] : NULL;
+  return master_main(configfile);
+}

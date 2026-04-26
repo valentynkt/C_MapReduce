@@ -5,7 +5,6 @@
 #include <sys/types.h>
 
 #include "config.h"
-#include "db.h"
 #include "event_loop.h"
 #include "networking.h"
 #include "task.h"
@@ -20,10 +19,10 @@ typedef struct {
 
 typedef struct {
   master_config_t config;
-  int master_fd;
+  int listen_fd;           /* TCP listener fd */
   event_loop_t el;
-  worker_t workers[MAX_FDS];
-  client_t clients[MAX_FDS];
+  client_t clients[MAX_FDS]; /* transport state per fd */
+  worker_t workers[MAX_FDS]; /* application state per fd */
   size_t clients_count;
   int pipe[2];
   int64_t cronloops;

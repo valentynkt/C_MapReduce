@@ -1,5 +1,6 @@
 #include "event_loop.h"
 #include "config.h"
+#include "master.c"
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -10,8 +11,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define MAX_EVENTS 64
-#define HZ 10
 int el_init(event_loop_t *el) {
   memset(el->read_handlers, 0, sizeof(el->read_handlers));
   memset(el->write_handlers, 0, sizeof(el->write_handlers));
@@ -19,7 +18,7 @@ int el_init(event_loop_t *el) {
   if (el->kq == -1)
     return -1;
 
-  el->poll_timeout_ms = 1000 / HZ;
+  el->poll_timeout_ms = 1000 / master.config.hz;
   return 0;
 }
 

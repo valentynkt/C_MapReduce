@@ -18,7 +18,7 @@ static config_entry_t config_table[] = {
     {NULL, 0, 0, 0, 0, NULL},
 };
 
-void init_server_config(void) {
+void master_config_init(void) {
   master.config.port = CONFIG_DEFAULT_PORT;
   master.config.tcp_backlog = CONFIG_DEFAULT_TCP_BACKLOG;
   master.config.hz = CONFIG_DEFAULT_HZ;
@@ -147,6 +147,6 @@ int load_config(const char *filename) {
     return -1;
   }
 
-  printf("[bytekv] loaded config from %s\n", filename);
+  printf("[mapreduce-master] loaded config from %s\n", filename);
   return 0;
 }

@@ -38,7 +38,7 @@ typedef struct {
   const char **enum_values;
 } config_entry_t;
 
-void init_server_config(void);
+void master_config_init(void);
 int load_config(const char *filename);
 
 #endif
