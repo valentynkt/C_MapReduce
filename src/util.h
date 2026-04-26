@@ -6,6 +6,8 @@
 #include <sys/types.h>
 
 #include <fcntl.h>
+#define container_of(ptr, type, member)                                        \
+  ((type *)((char *)(ptr) - offsetof(type, member)))
 
 ssize_t read_exact(int fd, char *buf, size_t len);
 ssize_t write_all(int fd, const char *buf, size_t len);

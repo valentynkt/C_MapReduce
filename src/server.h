@@ -1,5 +1,5 @@
-#ifndef NETWORKING_H
-#define NETWORKING_H
+#ifndef SERVER_H
+#define SERVER_H
 
 #include "config.h"
 #include "event_loop.h"

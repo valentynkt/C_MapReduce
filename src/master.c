@@ -4,7 +4,6 @@
 #include "config.h"
 #include "event_loop.h"
 #include "master.h"
-#include "networking.h"
 #include "util.h"
 #include <signal.h>
 #include <stdint.h>
@@ -18,7 +17,8 @@ master_t master;
 
 /* --- housekeeping --- */
 
-static void before_sleep(void) {
+static void before_sleep(event_loop_t *el) {
+  (void)el;
   master.now_ms = now_ms();
   master.now_realtime_ms = realtime_ms();
   master.cronloops++;
@@ -106,7 +106,7 @@ static int master_init(void) {
   printf("[mapreduce-master] listening on port %d (hz=%d)\n",
          master.config.port, master.config.hz);
 
-  if (el_init(&master.el) == -1) {
+  if (el_init(&master.el, 1000 / master.config.hz) == -1) {
     close(listen_fd);
     return EXIT_FAILURE;
   }

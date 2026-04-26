@@ -6,7 +6,7 @@
 
 #include "config.h"
 #include "event_loop.h"
-#include "networking.h"
+#include "server.h"
 #include "task.h"
 
 typedef struct {
@@ -19,7 +19,7 @@ typedef struct {
 
 typedef struct {
   master_config_t config;
-  int listen_fd;           /* TCP listener fd */
+  int listen_fd; /* TCP listener fd */
   event_loop_t el;
   client_t clients[MAX_FDS]; /* transport state per fd */
   worker_t workers[MAX_FDS]; /* application state per fd */

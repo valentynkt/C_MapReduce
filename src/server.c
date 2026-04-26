@@ -1,4 +1,3 @@
-#include "networking.h"
 #include "config.h"
 #include "event_loop.h"
 #include "master.h"
@@ -94,8 +93,8 @@ static void process_buffer(event_loop_t *el, int fd) {
 
     char *payload = c->buf + FRAME_HDR_SIZE;
     /* TODO: replace with rpc_dispatch(fd, payload, payload_len) */
-    fprintf(stderr, "[net] received %u bytes from fd=%d (echo)\n",
-            payload_len, fd);
+    fprintf(stderr, "[net] received %u bytes from fd=%d (echo)\n", payload_len,
+            fd);
     if (!send_framed(el, fd, payload, payload_len))
       return;
 

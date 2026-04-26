@@ -1,6 +1,5 @@
 #include "event_loop.h"
 #include "config.h"
-#include "master.h"
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -11,14 +10,14 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-int el_init(event_loop_t *el) {
+int el_init(event_loop_t *el, int poll_timeout_ms) {
   memset(el->read_handlers, 0, sizeof(el->read_handlers));
   memset(el->write_handlers, 0, sizeof(el->write_handlers));
   el->kq = kqueue();
   if (el->kq == -1)
     return -1;
 
-  el->poll_timeout_ms = 1000 / master.config.hz;
+  el->poll_timeout_ms = poll_timeout_ms;
   return 0;
 }
 
@@ -76,7 +75,9 @@ int el_run(event_loop_t *el) {
   struct kevent events[MAX_EVENTS];
 
   while (!el->stop) {
-    el->before_sleep_proc();
+    if (el->before_sleep_proc) {
+      el->before_sleep_proc(el);
+    }
 
     struct timespec timeout;
     timeout.tv_sec = el->poll_timeout_ms / 1000;

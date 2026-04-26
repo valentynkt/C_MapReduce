@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS = -Wall -Wextra -Werror -std=c17 -g -fsanitize=undefined -MMD -MP
 LDFLAGS = -fsanitize=undefined -g -lz
 
-TARGET = bytekv
+TARGET = mr
 SRC_DIR = src
 BUILD_DIR = build
 

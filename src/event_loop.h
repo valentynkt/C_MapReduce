@@ -5,7 +5,7 @@
 
 typedef struct event_loop event_loop_t;
 typedef void (*el_handler_fn)(event_loop_t *el, int fd);
-typedef void el_before_sleep_fn(void);
+typedef void el_before_sleep_fn(event_loop_t *el);
 
 struct event_loop {
   int kq;
@@ -16,7 +16,7 @@ struct event_loop {
   bool stop;
 };
 
-int el_init(event_loop_t *el);
+int el_init(event_loop_t *el, int poll_timeout_ms);
 int el_add(event_loop_t *el, int fd, el_handler_fn handler);
 int el_add_write(event_loop_t *el, int fd, el_handler_fn handler);
 void el_remove(event_loop_t *el, int fd);
