@@ -21,6 +21,5 @@ int64_t now_ms(void);
 int64_t realtime_ms(void);
 
 int durable_flush(int fd);
-int open_aof(const char *path);
 
 #endif

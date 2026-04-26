@@ -18,6 +18,7 @@ static void remove_client(event_loop_t *el, int fd) {
   printf("client disconnected (fd=%d)\n", fd);
   el_remove(el, fd);
   close(fd);
+
   master.clients[fd] = (client_t){0};
   master.clients_count--;
 }

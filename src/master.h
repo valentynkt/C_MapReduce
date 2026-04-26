@@ -19,14 +19,8 @@ typedef struct {
 
 typedef struct {
   master_config_t config;
-  int listen_fd; /* TCP listener fd */
-  event_loop_t el;
-  client_t clients[MAX_FDS]; /* transport state per fd */
   worker_t workers[MAX_FDS]; /* application state per fd */
-  size_t clients_count;
-  int pipe[2];
-  int64_t cronloops;
-  int64_t now_ms;          /* monotonic, for elapsed time */
+  server_t server;
   int64_t now_realtime_ms; /* wall clock, for persisted timestamps */
 } master_t;
 
