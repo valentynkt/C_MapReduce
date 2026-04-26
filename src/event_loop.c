@@ -1,6 +1,6 @@
 #include "event_loop.h"
 #include "config.h"
-#include "master.c"
+#include "master.h"
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
