@@ -4,10 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Per-worker application state, indexed by fd.
-   `active` here is redundant with networking.h's client_t.active —
-   client_t.active is the canonical source of truth for "is this slot live."
-   Drop in a follow-up cleanup once call sites are updated. */
+/* per-worker app state, indexed by fd.
+   `active` is redundant with client_t.active. drop later. */
 typedef struct {
   bool active;
   int current_task_id; /* -1 if no task */

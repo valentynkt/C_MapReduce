@@ -1,149 +1,56 @@
-#include <stdbool.h>
-#include <sys/types.h>
-
-#include "config.h"
-#include "event_loop.h"
 #include "master.h"
+#include "config.h"
+#include "server.h"
 #include "util.h"
-#include <signal.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 master_t master;
 
-/* --- housekeeping --- */
-
-static void before_sleep(event_loop_t *el) {
-  (void)el;
-  master.now_ms = now_ms();
-  master.now_realtime_ms = realtime_ms();
-  master.cronloops++;
-
-  client_timeouts_cron(&master.el);
+static int master_on_message(int fd, const char *payload, size_t len,
+                             void *ud) {
+  master_t *m = ud;
+  /* TODO: rpc_dispatch */
+  fprintf(stderr, "[master] message from fd=%d (%zu bytes)\n", fd, len);
+  (void)m;
+  (void)payload;
+  return 0;
 }
 
-/* --- signal handling --- */
-
-static volatile sig_atomic_t shutdown_signaled = 0;
-
-static void sig_shutdown_handler(int sig) {
-  if (shutdown_signaled && sig == SIGINT) {
-    static const char msg[] = "FORCE SHUTDOWN\n";
-    write(STDERR_FILENO, msg, sizeof(msg) - 1);
-    _exit(1);
-  }
-  shutdown_signaled = 1;
-
-  unsigned char byte = (unsigned char)sig;
-  write(master.pipe[1], &byte, 1);
+static void master_on_disconnect(int fd, void *ud) {
+  master_t *m = ud;
+  /* timeout sweep handles task reset, just clear the slot */
+  m->workers[fd] = (worker_t){0};
 }
 
-static void setup_signal_handlers(void) {
-  struct sigaction sig_act;
-  sigemptyset(&sig_act.sa_mask);
-  sig_act.sa_flags = 0;
-  sig_act.sa_handler = sig_shutdown_handler;
-  sigaction(SIGINT, &sig_act, NULL);
-  sigaction(SIGTERM, &sig_act, NULL);
+static void master_periodic(void *ud) {
+  master_t *m = ud;
+  m->now_realtime_ms = realtime_ms();
+  /* TODO: task_timeouts_check */
 }
-
-static void on_shutdown(event_loop_t *el, int fd) {
-  unsigned char buf[16];
-  for (;;) {
-    ssize_t n = read(fd, buf, sizeof(buf));
-    if (n <= 0)
-      break;
-    for (ssize_t i = 0; i < n; i++) {
-      switch (buf[i]) {
-      case SIGINT:
-        fprintf(stderr, "Received SIGINT, shutting down...\n");
-        break;
-      case SIGTERM:
-        fprintf(stderr, "Received SIGTERM, shutting down...\n");
-        break;
-      default:
-        fprintf(stderr, "Received signal %d, shutting down...\n", buf[i]);
-        break;
-      }
-    }
-  }
-  el->stop = 1;
-}
-
-/* --- lifecycle --- */
-static int shutdown_pipe_setup(int listen_fd) {
-  if (pipe(master.pipe) == -1) {
-    perror("pipe");
-    close(listen_fd);
-    return EXIT_FAILURE;
-  }
-
-  if (set_non_blocking(master.pipe[0]) == -1 ||
-      set_non_blocking(master.pipe[1]) == -1) {
-    close(listen_fd);
-    close(master.pipe[0]);
-    close(master.pipe[1]);
-    return EXIT_FAILURE;
-  }
-  return EXIT_SUCCESS;
-}
-
 static int master_init(void) {
-  master.now_ms = now_ms();
   master.now_realtime_ms = realtime_ms();
 
-  setup_signal_handlers();
-
-  int listen_fd =
-      create_listener(master.config.port, master.config.tcp_backlog);
-  if (listen_fd == -1)
+  if (server_init(&master.server, master.config.port, master.config.tcp_backlog,
+                  master.config.hz, master.config.client_timeout_s) != 0) {
     return EXIT_FAILURE;
+  }
+  server_set_on_message_cb(&master.server, master_on_message, &master);
+  server_set_on_disconnect_cb(&master.server, master_on_disconnect, &master);
+  server_set_on_periodic_cb(&master.server, master_periodic, &master);
 
-  printf("[mapreduce-master] listening on port %d (hz=%d)\n",
+  printf("[mapreduce-master] listining on port %d (hz=%d)\n",
          master.config.port, master.config.hz);
-
-  if (el_init(&master.el, 1000 / master.config.hz) == -1) {
-    close(listen_fd);
-    return EXIT_FAILURE;
-  }
-  master.el.before_sleep_proc = before_sleep;
-
-  if (shutdown_pipe_setup(listen_fd) == EXIT_FAILURE) {
-    return EXIT_FAILURE;
-  }
-
-  master.listen_fd = listen_fd;
-
-  if (el_add(&master.el, master.pipe[0], on_shutdown) == -1)
-    goto fail;
-
-  if (el_add(&master.el, listen_fd, on_accept) == -1)
-    goto fail;
-
   return EXIT_SUCCESS;
-
-fail:
-  close(listen_fd);
-  el_cleanup(&master.el);
-  return EXIT_FAILURE;
 }
 
-static void master_shutdown(void) {
-  for (int fd = 0; fd < MAX_FDS; fd++) {
-    if (master.clients[fd].active) {
-      shutdown(fd, SHUT_WR);
-      close(fd);
-    }
-  }
-  close(master.listen_fd);
-  close(master.pipe[0]);
-  close(master.pipe[1]);
-  el_cleanup(&master.el);
-}
+static void master_shutdown(void) { server_shutdown(&master.server); }
 
 int master_main(const char *configfile) {
   master_config_init();
@@ -157,7 +64,7 @@ int master_main(const char *configfile) {
     return EXIT_FAILURE;
   }
 
-  el_run(&master.el);
+  server_run(&master.server);
   master_shutdown();
   return EXIT_SUCCESS;
 }
