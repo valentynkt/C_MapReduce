@@ -14,7 +14,6 @@ typedef struct {
   int tcp_backlog;
   int hz;
   int client_timeout_s;
-  int client_timeout_check_hz;
 } master_config_t;
 
 typedef struct {

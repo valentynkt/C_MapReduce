@@ -12,7 +12,6 @@
 ssize_t read_exact(int fd, char *buf, size_t len);
 ssize_t write_all(int fd, const char *buf, size_t len);
 int set_non_blocking(int fd);
-int create_listener(int port, int backlog);
 
 /* Monotonic milliseconds, immune to NTP/DST jumps. */
 int64_t now_ms(void);

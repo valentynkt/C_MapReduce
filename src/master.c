@@ -45,7 +45,7 @@ static int master_init(void) {
   server_set_on_disconnect_cb(&master.server, master_on_disconnect, &master);
   server_set_on_periodic_cb(&master.server, master_periodic, &master);
 
-  printf("[mapreduce-master] listining on port %d (hz=%d)\n",
+  printf("[mapreduce-master] listening on port %d (hz=%d)\n",
          master.config.port, master.config.hz);
   return EXIT_SUCCESS;
 }

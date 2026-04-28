@@ -39,7 +39,7 @@ static void setup_signal_handlers(void) {
 }
 /* 2. Generic infrastructure */
 
-int create_listener(int port, int backlog) {
+static int create_listener(int port, int backlog) {
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd == -1) {
     perror("socket");
