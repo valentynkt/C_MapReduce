@@ -258,6 +258,11 @@ static void on_accept(event_loop_t *el, int server_fd) {
     close(fd);
     s->clients[fd] = (client_t){0};
     s->clients_count--;
+    return;
+  }
+
+  if (s->on_connect) {
+    s->on_connect(fd, s->on_connect_data);
   }
 }
 
@@ -376,6 +381,12 @@ void server_set_on_message_cb(server_t *s, server_on_message_fn fn,
                               void *user_data) {
   s->on_message = fn;
   s->on_message_data = user_data;
+}
+
+void server_set_on_connect_cb(server_t *s, server_on_connect_fn fn,
+                              void *user_data) {
+  s->on_connect = fn;
+  s->on_connect_data = user_data;
 }
 
 void server_set_on_disconnect_cb(server_t *s, server_on_disconnect_fn fn,

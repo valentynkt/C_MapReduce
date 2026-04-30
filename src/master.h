@@ -14,12 +14,21 @@ typedef struct {
   int tcp_backlog;
   int hz;
   int client_timeout_s;
+  int n_reduce;
+  int task_timeout_ms;
+  char *input_dir;
 } master_config_t;
 
 typedef struct {
   master_config_t config;
-  worker_t workers[MAX_FDS]; /* application state per fd */
   server_t server;
+
+  /* Application spine. */
+  job_t job;
+  task_t maps[MAX_MAP_TASKS];
+  task_t reduces[MAX_REDUCE_TASKS];
+  worker_t workers[MAX_FDS]; /* application state per fd */
+
   int64_t now_realtime_ms; /* wall clock, for persisted timestamps */
 } master_t;
 

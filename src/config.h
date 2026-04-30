@@ -13,11 +13,18 @@
 #define WBUF_SIZE ((MSG_MAX + FRAME_HDR_SIZE) * 2)
 #define CLIENT_TIMEOUT_CHECK_INTERVAL_MS 100
 
+/* Max byte length of an input split path. Used by both the wire format
+   (rpc.h) and the master's task table (task.h). */
+#define MAPREDUCE_PATH_MAX 1024
+
 /* Default values for runtime config */
 #define CONFIG_DEFAULT_PORT 9999
 #define CONFIG_DEFAULT_TCP_BACKLOG 511
 #define CONFIG_DEFAULT_HZ 10
 #define CONFIG_DEFAULT_CLIENT_TIMEOUT_S 300
+#define CONFIG_DEFAULT_INPUT_DIR "./input"
+#define CONFIG_DEFAULT_N_REDUCE 4
+#define CONFIG_DEFAULT_TASK_TIMEOUT_MS 10000
 
 /* Config entry types */
 typedef enum {

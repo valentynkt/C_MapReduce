@@ -13,6 +13,10 @@ static config_entry_t config_table[] = {
     {"hz", CONFIG_TYPE_INT, OFFSET(hz), 1, 500, NULL},
     {"client-timeout", CONFIG_TYPE_INT, OFFSET(client_timeout_s), 0, 86400,
      NULL},
+    {"n-reduce", CONFIG_TYPE_INT, OFFSET(n_reduce), 1, MAX_REDUCE_TASKS, NULL},
+    {"task-timeout-ms", CONFIG_TYPE_INT, OFFSET(task_timeout_ms), 100, 600000,
+     NULL},
+    {"input-dir", CONFIG_TYPE_STRING, OFFSET(input_dir), 0, 0, NULL},
     {NULL, 0, 0, 0, 0, NULL},
 };
 
@@ -21,6 +25,15 @@ void master_config_init(void) {
   master.config.tcp_backlog = CONFIG_DEFAULT_TCP_BACKLOG;
   master.config.hz = CONFIG_DEFAULT_HZ;
   master.config.client_timeout_s = CONFIG_DEFAULT_CLIENT_TIMEOUT_S;
+  master.config.n_reduce = CONFIG_DEFAULT_N_REDUCE;
+  master.config.task_timeout_ms = CONFIG_DEFAULT_TASK_TIMEOUT_MS;
+
+  /* strdup so apply_config's free() on the heap-vs-literal distinction stays consistent */
+  master.config.input_dir = strdup(CONFIG_DEFAULT_INPUT_DIR);
+  if (!master.config.input_dir) {
+    fprintf(stderr, "out of memory initializing config\n");
+    abort();
+  }
 }
 
 static config_entry_t *find_config(const char *name) {

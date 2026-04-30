@@ -6,7 +6,8 @@ SRC_DIR = src
 BUILD_DIR = build
 
 # shared between binaries
-COMMON_SRCS = $(SRC_DIR)/util.c
+COMMON_SRCS = $(SRC_DIR)/util.c \
+              $(SRC_DIR)/rpc.c
 
 # master only
 MASTER_SRCS = $(SRC_DIR)/master.c \

@@ -18,6 +18,7 @@ typedef struct {
 } client_t;
 typedef int (*server_on_message_fn)(int fd, const char *payload, size_t len,
                                     void *user_data);
+typedef void (*server_on_connect_fn)(int fd, void *user_data);
 typedef void (*server_on_disconnect_fn)(int fd, void *user_data);
 typedef void (*server_on_periodic_fn)(void *user_data);
 
@@ -35,6 +36,8 @@ typedef struct {
 
   server_on_message_fn on_message;
   void *on_message_data;
+  server_on_connect_fn on_connect;
+  void *on_connect_data;
   server_on_disconnect_fn on_disconnect;
   void *on_disconnect_data;
   server_on_periodic_fn on_periodic;
@@ -47,6 +50,8 @@ int server_run(server_t *s);
 void server_shutdown(server_t *s);
 
 void server_set_on_message_cb(server_t *s, server_on_message_fn fn,
+                              void *user_data);
+void server_set_on_connect_cb(server_t *s, server_on_connect_fn fn,
                               void *user_data);
 void server_set_on_disconnect_cb(server_t *s, server_on_disconnect_fn fn,
                                  void *user_data);
