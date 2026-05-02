@@ -1,9 +1,14 @@
+#include "config.h"
+#include "task.h"
 #include "util.h"
 #include <errno.h>
 #include <libgen.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/types.h> /* pid_t */
+#include <unistd.h>    /* getpid */
 #include <util.h>
 
 typedef int (*emit_token_fn)(const char *token, void *ud);
@@ -70,7 +75,24 @@ int worker_map_run(uint32_t task_id, uint32_t attempt_id, uint32_t n_reduce,
                    const char *input_path) {
   printf("[worker] run map task\n");
 
-  FILE **handles;
+  FILE *handles[MAX_REDUCE_TASKS] = {0};
+
+  for (uint32_t i = 0; i < n_reduce; i++) {
+    char temp_path[MAPREDUCE_PATH_MAX];
+    int n =
+        snprintf(temp_path, sizeof temp_path, "intermediate/mr-%u-%u.tmp.%d.%u",
+                 task_id /* X */, i /* Y */, (int)getpid(), attempt_id);
+    if (n < 0 || (size_t)n >= sizeof temp_path) {
+      /* truncated or formatting error */
+      return -1;
+    }
+    handles[i] = fopen(temp_path, "w");
+    if (!handles[i]) {
+      fprintf(stderr, "worker_map_run: fopen failed. Path: %s \n%s\n",
+              temp_path, strerror(errno));
+      return -1;
+    }
+  }
   emit_ctx_t ctx = (emit_ctx_t){
       .handles = handles,
       .R = n_reduce,
