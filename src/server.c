@@ -169,6 +169,7 @@ static void process_buffer(server_t *s, event_loop_t *el, int fd) {
       int rc = s->on_message(fd, payload, payload_len, s->on_message_data);
       if (rc != 0) {
         remove_client(s, el, fd);
+        return; /* client_t zeroed; do not touch c->buf / c->len */
       }
     }
 
