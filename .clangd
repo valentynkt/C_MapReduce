@@ -1,0 +1,7 @@
+CompileFlags:
+  Add:
+    - -xc
+    - -std=c17
+    - -Wall
+    - -Wextra
+    - -Isrc

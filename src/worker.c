@@ -12,6 +12,9 @@
 #include "config.h"
 #include "rpc.h"
 #include "util.h"
+#include "worker_map.h"
+
+#define MAX_TOKENS_WORD 100
 
 /* ----- helpers ----- */
 
@@ -123,13 +126,6 @@ static int send_task_done(int fd, uint32_t task_id, uint32_t attempt_id,
 
 /* ----- task runners (stubs for slice 2; real I/O lands in slice 3) ----- */
 
-static uint8_t run_map_task(void) {
-  printf("[worker] run map task\n");
-
-  sleep_ms(5000);
-  return 0;
-}
-
 static uint8_t run_reduce_task(void) {
   printf("[worker] run reduce task\n");
   return 0;
@@ -189,12 +185,15 @@ int main(int argc, char *argv[]) {
              "path=%s\n",
              resp.as.map.task_id, resp.as.map.attempt_id, resp.as.map.n_reduce,
              resp.as.map.input_path);
-      uint8_t result = run_map_task();
+      int rv = worker_map_run(resp.as.map.task_id, resp.as.map.attempt_id,
+                              resp.as.map.n_reduce, resp.as.map.input_path);
+      uint8_t result = (rv == 0) ? 0 : 1;
       if (send_task_done(fd, resp.as.map.task_id, resp.as.map.attempt_id,
                          result) != 0) {
         fprintf(stderr, "[worker] send_task_done failed\n");
         rc = EXIT_FAILURE;
         loop = false;
+        break;
       }
 
       uint8_t ack_buf[MSG_MAX];

@@ -5,6 +5,17 @@
 #include <time.h>
 #include <unistd.h>
 
+/* djb2 hash, returns raw hash, caller applies sizemask */
+size_t get_hash(const char *key) {
+  size_t hash = 5381;
+  int c;
+
+  while ((c = *key++)) {
+    hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+  }
+  return hash;
+}
+
 ssize_t read_exact(int fd, char *buf, size_t len) {
   size_t off = 0;
   while (off < len) {
