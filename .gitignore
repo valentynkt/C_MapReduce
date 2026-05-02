@@ -4,3 +4,5 @@
 /master
 /worker
 /worker
+compile_commands.json
+.cache/
