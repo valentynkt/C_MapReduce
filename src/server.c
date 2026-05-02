@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -164,7 +165,8 @@ static void process_buffer(server_t *s, event_loop_t *el, int fd) {
     if (c->len < FRAME_HDR_SIZE + payload_len)
       return;
 
-    char *payload = c->buf + FRAME_HDR_SIZE;
+    const uint8_t *payload = (uint8_t *)c->buf + FRAME_HDR_SIZE;
+
     if (s->on_message) {
       int rc = s->on_message(fd, payload, payload_len, s->on_message_data);
       if (rc != 0) {

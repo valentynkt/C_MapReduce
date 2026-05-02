@@ -16,7 +16,7 @@ typedef struct {
   size_t wlen;                        /* write buffer: total bytes queued */
   size_t woff;                        /* write buffer: bytes already sent */
 } client_t;
-typedef int (*server_on_message_fn)(int fd, const char *payload, size_t len,
+typedef int (*server_on_message_fn)(int fd, const uint8_t *payload, size_t len,
                                     void *user_data);
 typedef void (*server_on_connect_fn)(int fd, void *user_data);
 typedef void (*server_on_disconnect_fn)(int fd, void *user_data);

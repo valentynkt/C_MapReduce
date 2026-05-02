@@ -4,7 +4,7 @@
 #include "server.h"
 #include "task.h"
 #include "util.h"
-#include <cstdint>
+#include <assert.h>
 #include <dirent.h>
 #include <errno.h>
 #include <stdbool.h>
@@ -18,11 +18,22 @@
 #include <unistd.h>
 
 master_t master;
+
+static void maybe_advance_phase(void) {
+  if (master.job.phase == JOB_MAP && master.job.maps_done == master.job.M) {
+    master.job.phase = JOB_REDUCE;
+  }
+  if (master.job.phase == JOB_REDUCE &&
+      master.job.reduces_done == master.job.R) {
+    master.job.phase = JOB_DONE;
+  }
+}
+
 static int master_handle_get_task(int fd) {
   switch (master.job.phase) {
   case JOB_MAP: {
     int choosen = -1;
-    for (int i = 0; i < master.job.M; i++) {
+    for (uint32_t i = 0; i < master.job.M; i++) {
       task_t *task = &master.maps[i];
       int64_t now_ms = master.server.now_ms;
       if (task->state == TASK_PENDING) {
@@ -42,52 +53,40 @@ static int master_handle_get_task(int fd) {
         worker->current_kind = TASK_KIND_MAP;
         worker->current_task_id = i;
         worker->current_attempt_id = task->current_attempt;
-        choosen = i;
-        // How should we handle cases when there are no PENDING task to take?
-        // what should we return?
+        choosen = (int)i;
         break;
       }
     }
 
-    uint8_t *buf = malloc(MSG_MAX);
+    uint8_t buf[MSG_MAX];
+    size_t out_len;
     if (choosen >= 0) {
       task_t *t = &master.maps[choosen];
-      size_t out_len;
-      rpc_task_map_resp_t msg =
-          (rpc_task_map_resp_t){.task_id = choosen,
-                                .attempt_id = t->current_attempt,
-                                .input_path_len = t->input_path_len,
-                                .n_reduce = master.job.R};
-
+      rpc_task_map_resp_t msg = (rpc_task_map_resp_t){
+          .task_id = (uint32_t)choosen,
+          .attempt_id = t->current_attempt,
+          .input_path_len = t->input_path_len,
+          .n_reduce = master.job.R,
+      };
       memcpy(msg.input_path, t->input_path, t->input_path_len);
-      if (rpc_encode_task_map_resp(buf, MSG_MAX, &msg, &out_len) != 0) {
-
-        free(buf);
+      if (rpc_encode_task_map_resp(buf, sizeof buf, &msg, &out_len) != 0)
         return -1;
-      }
       if (server_send(&master.server, fd, (const char *)buf,
-                      (uint32_t)out_len) != 0) {
-        free(buf);
+                      (uint32_t)out_len) != 0)
         return -1;
-      }
-    }
-
-    else {
-      size_t out_len;
+    } else {
+      /* No PENDING. If maps_done < M, some are still running -> WAIT.
+         If maps_done == M, TaskDone failed to advance the phase -> bug. */
+      assert(master.job.maps_done < master.job.M);
       rpc_wait_resp_t msg = (rpc_wait_resp_t){
-          .wait_ms = (uint32_t)(master.job.task_timeout_ms / 2)};
-      if (rpc_encode_wait_resp(buf, MSG_MAX, &msg, &out_len) != 0) {
-
-        free(buf);
+          .wait_ms = (uint32_t)(master.job.task_timeout_ms / 2),
+      };
+      if (rpc_encode_wait_resp(buf, sizeof buf, &msg, &out_len) != 0)
         return -1;
-      }
       if (server_send(&master.server, fd, (const char *)buf,
-                      (uint32_t)out_len) != 0) {
-        free(buf);
+                      (uint32_t)out_len) != 0)
         return -1;
-      }
     }
-    free(buf);
     break;
   }
   case JOB_REDUCE:
@@ -102,28 +101,104 @@ static int master_handle_get_task(int fd) {
   }
   return 0;
 }
-static int master_on_message(int fd, const char *payload, size_t len,
+
+static int master_handle_task_done(int fd, const rpc_task_done_req_t *msg) {
+
+  switch (master.job.phase) {
+  case JOB_MAP: {
+    // ToDo: Probably could be extracted or moved above, to not duplicate in
+    // Reduce
+    int current_task_id = master.workers[fd].current_task_id;
+    task_t *t = &master.maps[current_task_id];
+
+    uint8_t buf[MSG_MAX];
+    size_t out_len;
+
+    if (rpc_encode_task_done_ack(buf, sizeof buf, &out_len) != 0)
+      return -1;
+
+    if (msg->attempt_id != t->current_attempt) {
+
+      if (server_send(&master.server, fd, (const char *)buf,
+                      (uint32_t)out_len) != 0) {
+
+        // ignore the result, zombie process;
+        master.workers[fd].has_task = false;
+        return -1;
+      }
+      return 0;
+    }
+
+    // Task Success
+    if (msg->result == 0) {
+      t->owner_fd = -1;
+      t->state = TASK_COMPLETED;
+
+      t->history[t->attempts_count - 1] = (attempt_record_t){
+          .attempt_id = t->current_attempt,
+          .worker_fd = fd,
+          .end_status = ATTEMPT_SUCCESS,
+          .ended_at_ms = master.server.now_ms,
+      };
+
+      master.job.maps_done += 1;
+      maybe_advance_phase();
+
+    } else {
+      t->history[t->attempts_count - 1] = (attempt_record_t){
+          .attempt_id = t->current_attempt,
+          .worker_fd = fd,
+          .end_status = ATTEMPT_FAILED,
+          .ended_at_ms = master.server.now_ms,
+      };
+      if (t->attempts_count >= MAX_ATTEMPTS) {
+        t->state = TASK_FAILED;
+        master.job.phase = JOB_FAILED;
+      } else {
+        t->state = TASK_PENDING;
+      }
+    }
+
+    // Send ACK
+    if (server_send(&master.server, fd, (const char *)buf, (uint32_t)out_len) !=
+        0)
+      return -1;
+    master.workers[fd].has_task = false;
+    break;
+  }
+  case JOB_REDUCE:
+    return -1;
+  case JOB_DONE:
+    return -1;
+  case JOB_FAILED:
+    return -1;
+  }
+  return 0;
+}
+
+static int master_on_message(int fd, const uint8_t *payload, size_t len,
                              void *ud) {
-  master_t *m = ud;
-  /* TODO: rpc_dispatch */
+  (void)ud;
   rpc_kind_t kind;
-  rpc_peek_kind(payload, len, &kind);
+  if (rpc_peek_kind(payload, len, &kind) != 0)
+    return -1;
   switch (kind) {
   case RPC_GET_TASK_REQ:
-    if (master_handle_get_task(fd) == -1) {
-      perror("master_handle_get_task error");
+    if (master_handle_get_task(fd) != 0)
       return -1;
-    }
     break;
+  case RPC_TASK_DONE_REQ: {
 
-  case RPC_TASK_DONE_REQ:
-    return -1;
+    rpc_task_done_req_t msg;
+    if (rpc_decode_task_done_req(payload + 1, len - 1, &msg) != 0)
+      return -1;
+    if (master_handle_task_done(fd, &msg) != 0)
+      return -1;
+    break;
+  }
   default:
     return -1;
   }
-  fprintf(stderr, "[master] message from fd=%d (%zu bytes)\n", fd, len);
-  (void)m;
-  (void)payload;
   return 0;
 }
 
@@ -144,7 +219,6 @@ static void master_on_disconnect(int fd, void *ud) {
 static void master_periodic(void *ud) {
   master_t *m = ud;
   m->now_realtime_ms = realtime_ms();
-  /* TODO: task_timeouts_check */
 }
 
 static int input_filter(const struct dirent *e) { return e->d_name[0] != '.'; }
