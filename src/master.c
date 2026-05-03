@@ -35,6 +35,88 @@ static const char *phase_name(job_phase_e p) {
   return "?";
 }
 
+static const char *attempt_end_name(attempt_end_status_e s) {
+  switch (s) {
+  case ATTEMPT_RUNNING:    return "RUNNING";
+  case ATTEMPT_SUCCESS:    return "SUCCESS";
+  case ATTEMPT_FAILED:     return "FAILED";
+  case ATTEMPT_TIMEOUT:    return "TIMEOUT";
+  case ATTEMPT_DISCONNECT: return "DISCONNECT";
+  }
+  return "?";
+}
+
+/* Close the current attempt of `t` without success.
+   Appends a history record with the given end_status, then decides:
+     - if attempts_count >= MAX_ATTEMPTS:
+         state -> TASK_FAILED, job.phase -> JOB_FAILED.
+     - else:
+         state -> TASK_PENDING (ready for reassignment).
+   Always clears owner_fd; the invariant "state == IN_PROGRESS iff owner_fd != -1"
+   is maintained.
+
+   Does NOT touch worker bookkeeping (`has_task`). The trigger sites own that:
+     - master_handle_task_done clears it after the ACK is sent.
+     - sweep_timeouts clears it when it decides to time the worker out.
+     - master_on_disconnect zeroes the whole worker slot. */
+static void task_attempt_ended(task_t *t, attempt_end_status_e end_status,
+                               int fd, int64_t now_ms, const char *kind_label,
+                               uint32_t task_id) {
+  t->history[t->attempts_count - 1] = (attempt_record_t){
+      .attempt_id = t->current_attempt,
+      .worker_fd = fd,
+      .end_status = end_status,
+      .ended_at_ms = now_ms,
+  };
+  t->owner_fd = -1;
+
+  if (t->attempts_count >= MAX_ATTEMPTS) {
+    t->state = TASK_FAILED;
+    master.job.phase = JOB_FAILED;
+    LOG_ERROR("master",
+              "%s task=%u FAILED terminal after %u attempts (%s); phase -> "
+              "JOB_FAILED",
+              kind_label, task_id, t->attempts_count,
+              attempt_end_name(end_status));
+  } else {
+    t->state = TASK_PENDING;
+    LOG_WARN("master",
+             "%s task=%u attempt=%u %s fd=%d — reset to PENDING (%u/%u)",
+             kind_label, task_id, t->current_attempt,
+             attempt_end_name(end_status), fd, t->attempts_count,
+             (uint32_t)MAX_ATTEMPTS);
+  }
+}
+
+/* Walk an array of tasks; for each TASK_IN_PROGRESS whose current attempt has
+   exceeded task_timeout_ms, close it via task_attempt_ended() with TIMEOUT.
+   Phase-agnostic — caller selects the right array (maps[] or reduces[]). */
+static void sweep_timeouts(task_t *tasks, uint32_t n, const char *kind_label) {
+  int64_t now = master.server.now_ms;
+  int64_t timeout_ms = master.config.task_timeout_ms;
+
+  for (uint32_t i = 0; i < n; i++) {
+    task_t *t = &tasks[i];
+    if (t->state != TASK_IN_PROGRESS)
+      continue;
+    if (now - t->started_at_ms <= timeout_ms)
+      continue;
+
+    int fd = t->owner_fd;
+    LOG_WARN("master",
+             "%s task=%u attempt=%u timed out fd=%d (elapsed_ms=%lld)",
+             kind_label, i, t->current_attempt, fd,
+             (long long)(now - t->started_at_ms));
+
+    /* Master's view: this worker no longer holds the task. Worker may still
+       think it does — the protocol handles late TaskDone via attempt-id
+       mismatch in master_handle_task_done. */
+    master.workers[fd].has_task = false;
+
+    task_attempt_ended(t, ATTEMPT_TIMEOUT, fd, now, kind_label, i);
+  }
+}
+
 static void maybe_advance_phase(void) {
   if (master.job.phase == JOB_MAP && master.job.maps_done == master.job.M) {
     LOG_INFO("master", "phase: JOB_MAP -> JOB_REDUCE (maps_done=%u/%u)",
@@ -200,27 +282,8 @@ static int master_handle_task_done(int fd, const rpc_task_done_req_t *msg) {
       maybe_advance_phase();
 
     } else {
-      t->history[t->attempts_count - 1] = (attempt_record_t){
-          .attempt_id = t->current_attempt,
-          .worker_fd = fd,
-          .end_status = ATTEMPT_FAILED,
-          .ended_at_ms = master.server.now_ms,
-      };
-      if (t->attempts_count >= MAX_ATTEMPTS) {
-        t->state = TASK_FAILED;
-        master.job.phase = JOB_FAILED;
-        LOG_ERROR("master",
-                  "MAP task=%d FAILED terminal after %u attempts; phase -> "
-                  "JOB_FAILED",
-                  current_task_id, t->attempts_count);
-      } else {
-        t->state = TASK_PENDING;
-        LOG_WARN(
-            "master",
-            "MAP task=%d attempt=%u failed fd=%d — reset to PENDING (%u/%u)",
-            current_task_id, t->current_attempt, fd, t->attempts_count,
-            (uint32_t)MAX_ATTEMPTS);
-      }
+      task_attempt_ended(t, ATTEMPT_FAILED, fd, master.server.now_ms, "MAP",
+                         (uint32_t)current_task_id);
     }
 
     // Send ACK
@@ -294,97 +357,26 @@ static void master_on_disconnect(int fd, void *ud) {
   /* timeout sweep handles task reset, just clear the slot */
   m->workers[fd] = (worker_t){0};
 }
-
 static void master_periodic(void *ud) {
   master_t *m = ud;
   m->now_realtime_ms = realtime_ms();
-  // We should consider migrating not by HZ but by time, like: (e.g., sweep
-  // task_timeout_ms / N apart)
-  if (m->server.cronloops % 10 != 0) {
+
+  /* Sweep at ~1 Hz when server hz=10. Sweep period is decoupled-via-modulo
+     from server tick rate; revisit if hz changes — see roadmap §2.4. */
+  if (m->server.cronloops % 10 != 0)
     return;
-  }
-  // check for timeout
-  if (m->job.phase == JOB_MAP) {
 
-    for (uint32_t i = 0; i < m->job.M; i++) {
-      // ToDo: is started_at_ms set as realtime or monotonic?
-      // could the history[0] be null? or wrong? maybe we need to check it
-      // here. m->maps[i].history[0] != NULL
-      if (m->maps[i].state != TASK_IN_PROGRESS) {
-        continue;
-      }
-      if (m->server.now_ms - m->maps[i].started_at_ms >
-          m->config.task_timeout_ms) {
-        LOG_WARN("master", "master_periodic, task=%d timeout", i);
-        task_t *t = &m->maps[i];
-        m->workers[t->owner_fd].has_task = false;
-
-        t->history[t->attempts_count - 1] = (attempt_record_t){
-            .attempt_id = t->current_attempt,
-            .worker_fd = t->owner_fd,
-            .end_status = ATTEMPT_TIMEOUT,
-            .ended_at_ms = master.server.now_ms,
-        };
-
-        if (t->attempts_count >= MAX_ATTEMPTS) {
-          t->state = TASK_FAILED;
-          m->job.phase = JOB_FAILED;
-          LOG_ERROR("master",
-                    "MAP task=%d FAILED terminal after %u attempts; phase -> "
-                    "JOB_FAILED",
-                    i, t->attempts_count);
-        } else {
-          t->state = TASK_PENDING;
-          LOG_WARN("master",
-                   "MAP task=%d attempt=%u failed fd=%d — reset to PENDING "
-                   "(%u/%u)",
-                   i, t->current_attempt, t->owner_fd, t->attempts_count,
-                   (uint32_t)MAX_ATTEMPTS);
-        }
-      }
-    }
-  }
-  if (m->job.phase == JOB_REDUCE) {
-
-    for (uint32_t i = 0; i < m->job.R; i++) {
-      // ToDo: is started_at_ms set as realtime or monotonic?
-      // could the history[0] be null? or wrong? maybe we need to check it
-      // here. m->maps[i].history[0] != NULL
-
-      if (m->reduces[i].state != TASK_IN_PROGRESS) {
-        continue;
-      }
-      if (m->server.now_ms - m->reduces[i].started_at_ms >
-          m->config.task_timeout_ms) {
-        LOG_WARN("master", "master_periodic, task=%d timeout", i);
-        task_t *t = &m->reduces[i];
-        m->workers[t->owner_fd].has_task = false;
-
-        t->history[t->attempts_count - 1] = (attempt_record_t){
-            .attempt_id = t->current_attempt,
-            .worker_fd = t->owner_fd,
-            .end_status = ATTEMPT_TIMEOUT,
-            .ended_at_ms = master.server.now_ms,
-        };
-
-        if (t->attempts_count >= MAX_ATTEMPTS) {
-          t->state = TASK_FAILED;
-          m->job.phase = JOB_FAILED;
-          LOG_ERROR(
-              "master",
-              "REDUCE task=%d FAILED terminal after %u attempts; phase -> "
-              "JOB_FAILED",
-              i, t->attempts_count);
-        } else {
-          t->state = TASK_PENDING;
-          LOG_WARN("master",
-                   "REDUCE task=%d attempt=%u failed fd=%d — reset to PENDING "
-                   "(%u/%u)",
-                   i, t->current_attempt, t->owner_fd, t->attempts_count,
-                   (uint32_t)MAX_ATTEMPTS);
-        }
-      }
-    }
+  switch (m->job.phase) {
+  case JOB_MAP:
+    sweep_timeouts(m->maps, m->job.M, "MAP");
+    break;
+  case JOB_REDUCE:
+    sweep_timeouts(m->reduces, m->job.R, "REDUCE");
+    break;
+  case JOB_DONE:
+  case JOB_FAILED:
+    /* Nothing IN_PROGRESS to time out in terminal phases. */
+    break;
   }
 }
 
