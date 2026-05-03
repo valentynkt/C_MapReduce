@@ -37,11 +37,16 @@ static const char *phase_name(job_phase_e p) {
 
 static const char *attempt_end_name(attempt_end_status_e s) {
   switch (s) {
-  case ATTEMPT_RUNNING:    return "RUNNING";
-  case ATTEMPT_SUCCESS:    return "SUCCESS";
-  case ATTEMPT_FAILED:     return "FAILED";
-  case ATTEMPT_TIMEOUT:    return "TIMEOUT";
-  case ATTEMPT_DISCONNECT: return "DISCONNECT";
+  case ATTEMPT_RUNNING:
+    return "RUNNING";
+  case ATTEMPT_SUCCESS:
+    return "SUCCESS";
+  case ATTEMPT_FAILED:
+    return "FAILED";
+  case ATTEMPT_TIMEOUT:
+    return "TIMEOUT";
+  case ATTEMPT_DISCONNECT:
+    return "DISCONNECT";
   }
   return "?";
 }
@@ -52,16 +57,16 @@ static const char *attempt_end_name(attempt_end_status_e s) {
          state -> TASK_FAILED, job.phase -> JOB_FAILED.
      - else:
          state -> TASK_PENDING (ready for reassignment).
-   Always clears owner_fd; the invariant "state == IN_PROGRESS iff owner_fd != -1"
-   is maintained.
+   Always clears owner_fd; the invariant "state == IN_PROGRESS iff owner_fd !=
+   -1" is maintained.
 
    Does NOT touch worker bookkeeping (`has_task`). The trigger sites own that:
      - master_handle_task_done clears it after the ACK is sent.
      - sweep_timeouts clears it when it decides to time the worker out.
      - master_on_disconnect zeroes the whole worker slot. */
-static void task_attempt_ended(task_t *t, attempt_end_status_e end_status,
-                               int fd, int64_t now_ms, const char *kind_label,
-                               uint32_t task_id) {
+static int task_attempt_ended(task_t *t, attempt_end_status_e end_status,
+                              int fd, int64_t now_ms, const char *kind_label,
+                              uint32_t task_id) {
   t->history[t->attempts_count - 1] = (attempt_record_t){
       .attempt_id = t->current_attempt,
       .worker_fd = fd,
@@ -78,14 +83,15 @@ static void task_attempt_ended(task_t *t, attempt_end_status_e end_status,
               "JOB_FAILED",
               kind_label, task_id, t->attempts_count,
               attempt_end_name(end_status));
+    return -1;
   } else {
     t->state = TASK_PENDING;
-    LOG_WARN("master",
-             "%s task=%u attempt=%u %s fd=%d — reset to PENDING (%u/%u)",
-             kind_label, task_id, t->current_attempt,
-             attempt_end_name(end_status), fd, t->attempts_count,
-             (uint32_t)MAX_ATTEMPTS);
+    LOG_WARN(
+        "master", "%s task=%u attempt=%u %s fd=%d — reset to PENDING (%u/%u)",
+        kind_label, task_id, t->current_attempt, attempt_end_name(end_status),
+        fd, t->attempts_count, (uint32_t)MAX_ATTEMPTS);
   }
+  return 0;
 }
 
 /* Walk an array of tasks; for each TASK_IN_PROGRESS whose current attempt has
@@ -108,12 +114,12 @@ static void sweep_timeouts(task_t *tasks, uint32_t n, const char *kind_label) {
              kind_label, i, t->current_attempt, fd,
              (long long)(now - t->started_at_ms));
 
-    /* Master's view: this worker no longer holds the task. Worker may still
-       think it does — the protocol handles late TaskDone via attempt-id
-       mismatch in master_handle_task_done. */
-    master.workers[fd].has_task = false;
+    // -1 from task_attempt_ended means the job is failed, so no need to
+    // continue the loop;
 
-    task_attempt_ended(t, ATTEMPT_TIMEOUT, fd, now, kind_label, i);
+    if (task_attempt_ended(t, ATTEMPT_TIMEOUT, fd, now, kind_label, i) != 0) {
+      break;
+    }
   }
 }
 
@@ -132,6 +138,8 @@ static void maybe_advance_phase(void) {
 }
 
 static int master_handle_get_task(int fd) {
+  uint8_t buf[MSG_MAX];
+  size_t out_len;
   switch (master.job.phase) {
   case JOB_MAP: {
     int choosen = -1;
@@ -160,8 +168,6 @@ static int master_handle_get_task(int fd) {
       }
     }
 
-    uint8_t buf[MSG_MAX];
-    size_t out_len;
     if (choosen >= 0) {
       task_t *t = &master.maps[choosen];
       rpc_task_map_resp_t msg = (rpc_task_map_resp_t){
@@ -188,27 +194,17 @@ static int master_handle_get_task(int fd) {
       };
       if (rpc_encode_wait_resp(buf, sizeof buf, &msg, &out_len) != 0)
         return -1;
-      if (server_send(&master.server, fd, (const char *)buf,
-                      (uint32_t)out_len) != 0)
-        return -1;
       LOG_INFO("master", "WAIT fd=%d phase=JOB_MAP wait_ms=%u maps_done=%u/%u",
                fd, msg.wait_ms, master.job.maps_done, master.job.M);
     }
     break;
   }
   case JOB_REDUCE: {
-    uint8_t buf[MSG_MAX];
-    size_t out_len;
     // busy waiting stub, for the worker.
-
     rpc_wait_resp_t msg = (rpc_wait_resp_t){
         .wait_ms = (uint32_t)(master.job.task_timeout_ms / 2),
     };
     if (rpc_encode_wait_resp(buf, sizeof buf, &msg, &out_len) != 0)
-      return -1;
-
-    if (server_send(&master.server, fd, (const char *)buf, (uint32_t)out_len) !=
-        0)
       return -1;
 
     LOG_WARN("master", "GetTask fd=%d phase=JOB_REDUCE — not yet implemented",
@@ -216,10 +212,17 @@ static int master_handle_get_task(int fd) {
     break;
   }
   case JOB_DONE:
+    if (rpc_encode_done_resp(buf, sizeof buf, &out_len) != 0) {
+      return -1;
+    }
+
     LOG_WARN("master", "GetTask fd=%d phase=JOB_DONE — not yet implemented",
              fd);
     break;
   case JOB_FAILED:
+    if (rpc_encode_done_resp(buf, sizeof buf, &out_len) != 0) {
+      return -1;
+    }
     LOG_WARN("master", "GetTask fd=%d phase=JOB_FAILED — not yet implemented",
              fd);
     break;
@@ -228,6 +231,10 @@ static int master_handle_get_task(int fd) {
               (int)master.job.phase);
     return -1;
   }
+
+  if (server_send(&master.server, fd, (const char *)buf, (uint32_t)out_len) !=
+      0)
+    return -1;
   return 0;
 }
 
@@ -235,8 +242,7 @@ static int master_handle_task_done(int fd, const rpc_task_done_req_t *msg) {
 
   switch (master.job.phase) {
   case JOB_MAP: {
-    // ToDo: Probably could be extracted or moved above, to not duplicate in
-    // Reduce
+    // ToDO: Probably could be extracted to reuse the similar logic in Reduce
     int current_task_id = master.workers[fd].current_task_id;
     task_t *t = &master.maps[current_task_id];
 
