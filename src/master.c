@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/errno.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -238,6 +239,17 @@ static int master_init_job(void) {
     return -1;
   }
 
+  if (mkdir("intermediate", 0755) != 0 && errno != EEXIST) {
+
+    fprintf(stderr, "mkdir(intermediate):%s\n", strerror(errno));
+    return -1;
+  }
+
+  if (mkdir("output", 0755) != 0 && errno != EEXIST) {
+
+    fprintf(stderr, "mkdir(output): %s\n", strerror(errno));
+    return -1;
+  }
   uint32_t M = 0;
   for (int i = 0; i < n; i++) {
     char path[MAPREDUCE_PATH_MAX];

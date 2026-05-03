@@ -2,16 +2,14 @@
 #include "task.h"
 #include "util.h"
 #include <errno.h>
-#include <libgen.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h> /* pid_t */
 #include <unistd.h>    /* getpid */
-#include <util.h>
 
-typedef int (*emit_token_fn)(const char *token, void *ud);
+typedef void (*emit_token_fn)(const char *token, void *ud);
 
 typedef struct {
   FILE **handles;
@@ -19,28 +17,19 @@ typedef struct {
   const char *doc_name;
 } emit_ctx_t;
 
-static int emit_word_count(const char *token, void *ud) {
+static void emit_word_count(const char *token, void *ud) {
   emit_ctx_t *ctx = (emit_ctx_t *)ud;
   uint32_t y = get_hash(token) % ctx->R;
-  if (fprintf(ctx->handles[y], "%s\t1\n", token) != strlen(token)) {
-    fprintf(stderr, "emit_word_count: fprintf token(%s): %s\n", token,
-            strerror(errno));
-    return -1;
-  }
-  return 0;
+  fprintf(ctx->handles[y], "%s\t1\n", token);
 }
 
-static int emit_inverted_index(const char *token, void *ud) {
+/*
+static void emit_inverted_index(const char *token, void *ud) {
   emit_ctx_t *ctx = (emit_ctx_t *)ud;
   uint32_t y = get_hash(token) % ctx->R;
-  if (fprintf(ctx->handles[y], "%s\t%s\n", token, ctx->doc_name) !=
-      strlen(token)) {
-    fprintf(stderr, "emit_word_count: fprintf token(%s): %s\n", token,
-            strerror(errno));
-    return -1;
-  }
-  return 0;
+  fprintf(ctx->handles[y], "%s\t%s\n", token, ctx->doc_name);
 }
+*/
 
 static int tokenize_file(const char *path, emit_token_fn emit, void *ud) {
   FILE *f = fopen(path, "r");
@@ -76,40 +65,71 @@ int worker_map_run(uint32_t task_id, uint32_t attempt_id, uint32_t n_reduce,
   printf("[worker] run map task\n");
 
   FILE *handles[MAX_REDUCE_TASKS] = {0};
+  char temp_paths[MAX_REDUCE_TASKS][MAPREDUCE_PATH_MAX];
+  char final_paths[MAX_REDUCE_TASKS][MAPREDUCE_PATH_MAX];
 
   for (uint32_t i = 0; i < n_reduce; i++) {
-    char temp_path[MAPREDUCE_PATH_MAX];
-    int n =
-        snprintf(temp_path, sizeof temp_path, "intermediate/mr-%u-%u.tmp.%d.%u",
-                 task_id /* X */, i /* Y */, (int)getpid(), attempt_id);
-    if (n < 0 || (size_t)n >= sizeof temp_path) {
-      /* truncated or formatting error */
+    int n = snprintf(temp_paths[i], MAPREDUCE_PATH_MAX,
+                     "intermediate/mr-%u-%u.tmp.%d.%u", task_id /* X */,
+                     i /* Y */, (int)getpid(), attempt_id);
+    if (n < 0 || (size_t)n >= MAPREDUCE_PATH_MAX) {
+      fprintf(stderr, "worker_map_run: temp path truncation for y=%u\n", i);
+      for (uint32_t j = 0; j < i; j++)
+        fclose(handles[j]);
       return -1;
     }
-    handles[i] = fopen(temp_path, "w");
+
+    n = snprintf(final_paths[i], MAPREDUCE_PATH_MAX, "intermediate/mr-%u-%u",
+                 task_id, i);
+    if (n < 0 || (size_t)n >= MAPREDUCE_PATH_MAX) {
+      fprintf(stderr, "worker_map_run: final path truncation for y=%u\n", i);
+      for (uint32_t j = 0; j < i; j++)
+        fclose(handles[j]);
+      return -1;
+    }
+
+    handles[i] = fopen(temp_paths[i], "w");
     if (!handles[i]) {
-      fprintf(stderr, "worker_map_run: fopen failed. Path: %s \n%s\n",
-              temp_path, strerror(errno));
+      fprintf(stderr, "worker_map_run: fopen(%s): %s\n", temp_paths[i],
+              strerror(errno));
+      for (uint32_t j = 0; j < i; j++)
+        fclose(handles[j]);
       return -1;
     }
   }
+
+  const char *slash = strrchr(input_path, '/');
+  const char *doc_name = slash ? slash + 1 : input_path;
+
   emit_ctx_t ctx = (emit_ctx_t){
       .handles = handles,
       .R = n_reduce,
-      .doc_name = basename((char *)input_path),
+      .doc_name = doc_name,
   };
 
-  // we could add some configuration here to switch between normal index and
-  // inverted index.
-  tokenize_file(input_path, emit_word_count, &ctx);
-  // 1. Open the input file, read it bytes.
-  // 2. Tokenize the bytes into records (whole input file is one record.)
-  // 3. emit zero or more key, value pairs.
-  // 4. Hash each emitted key, compute partition Y = hash(key) % R
-  // 5. Write the (key, value) (APPEND flag), to mr-X-Y
+  int rc = tokenize_file(input_path, emit_word_count, &ctx);
 
-  // is input_path null terminated? Or we should add null termination so fopen
-  // will work properly if it expects null terminated string.
+  /* Close pass: always run, regardless of rc, so we don't leak fds. */
+  for (uint32_t y = 0; y < n_reduce; y++) {
+    if (ferror(handles[y]))
+      rc = -1;
+    if (fclose(handles[y]) != 0) {
+      fprintf(stderr, "worker_map_run: fclose(%s): %s\n", temp_paths[y],
+              strerror(errno));
+      rc = -1;
+    }
+  }
 
-  return 0;
+  /* Rename pass: only run if everything was clean. */
+  if (rc == 0) {
+    for (uint32_t y = 0; y < n_reduce; y++) {
+      if (rename(temp_paths[y], final_paths[y]) != 0) {
+        fprintf(stderr, "worker_map_run: rename(%s -> %s): %s\n", temp_paths[y],
+                final_paths[y], strerror(errno));
+        rc = -1;
+      }
+    }
+  }
+
+  return rc;
 }

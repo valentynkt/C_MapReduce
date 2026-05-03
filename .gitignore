@@ -6,3 +6,4 @@
 /worker
 compile_commands.json
 .cache/
+/intermediate
