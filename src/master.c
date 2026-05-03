@@ -1,5 +1,6 @@
 #include "master.h"
 #include "config.h"
+#include "log.h"
 #include "rpc.h"
 #include "server.h"
 #include "task.h"
@@ -20,12 +21,30 @@
 
 master_t master;
 
+static const char *phase_name(job_phase_e p) {
+  switch (p) {
+  case JOB_MAP:
+    return "JOB_MAP";
+  case JOB_REDUCE:
+    return "JOB_REDUCE";
+  case JOB_DONE:
+    return "JOB_DONE";
+  case JOB_FAILED:
+    return "JOB_FAILED";
+  }
+  return "?";
+}
+
 static void maybe_advance_phase(void) {
   if (master.job.phase == JOB_MAP && master.job.maps_done == master.job.M) {
+    LOG_INFO("master", "phase: JOB_MAP -> JOB_REDUCE (maps_done=%u/%u)",
+             master.job.maps_done, master.job.M);
     master.job.phase = JOB_REDUCE;
   }
   if (master.job.phase == JOB_REDUCE &&
       master.job.reduces_done == master.job.R) {
+    LOG_INFO("master", "phase: JOB_REDUCE -> JOB_DONE (reduces_done=%u/%u)",
+             master.job.reduces_done, master.job.R);
     master.job.phase = JOB_DONE;
   }
 }
@@ -75,6 +94,9 @@ static int master_handle_get_task(int fd) {
       if (server_send(&master.server, fd, (const char *)buf,
                       (uint32_t)out_len) != 0)
         return -1;
+      LOG_INFO("master",
+               "assigned MAP task=%d attempt=%u fd=%d input=%s n_reduce=%u",
+               choosen, t->current_attempt, fd, t->input_path, master.job.R);
     } else {
       /* No PENDING. If maps_done < M, some are still running -> WAIT.
          If maps_done == M, TaskDone failed to advance the phase -> bug. */
@@ -87,17 +109,27 @@ static int master_handle_get_task(int fd) {
       if (server_send(&master.server, fd, (const char *)buf,
                       (uint32_t)out_len) != 0)
         return -1;
+      LOG_INFO("master",
+               "WAIT fd=%d phase=JOB_MAP wait_ms=%u maps_done=%u/%u", fd,
+               msg.wait_ms, master.job.maps_done, master.job.M);
     }
     break;
   }
   case JOB_REDUCE:
+    LOG_WARN("master", "GetTask fd=%d phase=JOB_REDUCE — not yet implemented",
+             fd);
     break;
   case JOB_DONE:
+    LOG_WARN("master", "GetTask fd=%d phase=JOB_DONE — not yet implemented",
+             fd);
     break;
   case JOB_FAILED:
+    LOG_WARN("master", "GetTask fd=%d phase=JOB_FAILED — not yet implemented",
+             fd);
     break;
   default:
-    perror("wrong job phase");
+    LOG_ERROR("master", "GetTask fd=%d invalid phase=%d", fd,
+              (int)master.job.phase);
     return -1;
   }
   return 0;
@@ -119,6 +151,10 @@ static int master_handle_task_done(int fd, const rpc_task_done_req_t *msg) {
       return -1;
 
     if (msg->attempt_id != t->current_attempt) {
+      LOG_WARN("master",
+               "stale TaskDone fd=%d task=%u attempt=%u (current=%u) — ack and "
+               "drop",
+               fd, msg->task_id, msg->attempt_id, t->current_attempt);
 
       if (server_send(&master.server, fd, (const char *)buf,
                       (uint32_t)out_len) != 0) {
@@ -143,6 +179,10 @@ static int master_handle_task_done(int fd, const rpc_task_done_req_t *msg) {
       };
 
       master.job.maps_done += 1;
+      LOG_INFO("master",
+               "MAP task=%d attempt=%u COMPLETED fd=%d (maps_done=%u/%u)",
+               current_task_id, t->current_attempt, fd, master.job.maps_done,
+               master.job.M);
       maybe_advance_phase();
 
     } else {
@@ -155,8 +195,17 @@ static int master_handle_task_done(int fd, const rpc_task_done_req_t *msg) {
       if (t->attempts_count >= MAX_ATTEMPTS) {
         t->state = TASK_FAILED;
         master.job.phase = JOB_FAILED;
+        LOG_ERROR("master",
+                  "MAP task=%d FAILED terminal after %u attempts; phase -> "
+                  "JOB_FAILED",
+                  current_task_id, t->attempts_count);
       } else {
         t->state = TASK_PENDING;
+        LOG_WARN(
+            "master",
+            "MAP task=%d attempt=%u failed fd=%d — reset to PENDING (%u/%u)",
+            current_task_id, t->current_attempt, fd, t->attempts_count,
+            (uint32_t)MAX_ATTEMPTS);
       }
     }
 
@@ -168,10 +217,14 @@ static int master_handle_task_done(int fd, const rpc_task_done_req_t *msg) {
     break;
   }
   case JOB_REDUCE:
+    LOG_WARN("master",
+             "TaskDone fd=%d phase=JOB_REDUCE — not yet implemented", fd);
     return -1;
   case JOB_DONE:
+    LOG_WARN("master", "TaskDone fd=%d phase=JOB_DONE — unexpected", fd);
     return -1;
   case JOB_FAILED:
+    LOG_WARN("master", "TaskDone fd=%d phase=JOB_FAILED — ignoring", fd);
     return -1;
   }
   return 0;
@@ -209,10 +262,21 @@ static void master_on_connect(int fd, void *ud) {
       .connected_at_ms = m->server.now_ms,
       .has_task = false,
   };
+  LOG_INFO("master", "worker connected fd=%d", fd);
 }
 
 static void master_on_disconnect(int fd, void *ud) {
   master_t *m = ud;
+  worker_t *w = &m->workers[fd];
+  if (w->has_task) {
+    LOG_WARN("master",
+             "worker disconnected fd=%d had in-flight task kind=%d id=%u "
+             "attempt=%u (timeout sweep will reset)",
+             fd, (int)w->current_kind, w->current_task_id,
+             w->current_attempt_id);
+  } else {
+    LOG_INFO("master", "worker disconnected fd=%d", fd);
+  }
   /* timeout sweep handles task reset, just clear the slot */
   m->workers[fd] = (worker_t){0};
 }
@@ -234,37 +298,35 @@ static int master_init_job(void) {
   struct dirent **entries = NULL;
   int n = scandir(master.config.input_dir, &entries, input_filter, alphasort);
   if (n < 0) {
-    fprintf(stderr, "scandir(%s): %s\n", master.config.input_dir,
-            strerror(errno));
+    LOG_ERROR("master", "scandir(%s): %s", master.config.input_dir,
+              strerror(errno));
     return -1;
   }
 
   if (mkdir("intermediate", 0755) != 0 && errno != EEXIST) {
-
-    fprintf(stderr, "mkdir(intermediate):%s\n", strerror(errno));
+    LOG_ERROR("master", "mkdir(intermediate): %s", strerror(errno));
     return -1;
   }
-
   if (mkdir("output", 0755) != 0 && errno != EEXIST) {
-
-    fprintf(stderr, "mkdir(output): %s\n", strerror(errno));
+    LOG_ERROR("master", "mkdir(output): %s", strerror(errno));
     return -1;
   }
+
   uint32_t M = 0;
   for (int i = 0; i < n; i++) {
     char path[MAPREDUCE_PATH_MAX];
     int written = snprintf(path, sizeof path, "%s/%s", master.config.input_dir,
                            entries[i]->d_name);
     if (written < 0 || (size_t)written >= sizeof path) {
-      fprintf(stderr, "input path too long: %s/%s\n", master.config.input_dir,
-              entries[i]->d_name);
+      LOG_ERROR("master", "input path too long: %s/%s", master.config.input_dir,
+                entries[i]->d_name);
       free_scandir_entries(entries, n);
       return -1;
     }
 
     struct stat sb;
     if (stat(path, &sb) == -1) {
-      fprintf(stderr, "stat(%s): %s\n", path, strerror(errno));
+      LOG_ERROR("master", "stat(%s): %s", path, strerror(errno));
       free_scandir_entries(entries, n);
       return -1;
     }
@@ -272,8 +334,8 @@ static int master_init_job(void) {
       continue;
 
     if (M >= MAX_MAP_TASKS) {
-      fprintf(stderr, "too many input splits in %s (>%d)\n",
-              master.config.input_dir, MAX_MAP_TASKS);
+      LOG_ERROR("master", "too many input splits in %s (>%d)",
+                master.config.input_dir, MAX_MAP_TASKS);
       free_scandir_entries(entries, n);
       return -1;
     }
@@ -291,7 +353,8 @@ static int master_init_job(void) {
   free_scandir_entries(entries, n);
 
   if (M == 0) {
-    fprintf(stderr, "no input splits found in %s\n", master.config.input_dir);
+    LOG_ERROR("master", "no input splits found in %s",
+              master.config.input_dir);
     return -1;
   }
 
@@ -299,8 +362,8 @@ static int master_init_job(void) {
      here too against stale/uninitialized config. */
   uint32_t R = (uint32_t)master.config.n_reduce;
   if (R == 0 || R > MAX_REDUCE_TASKS) {
-    fprintf(stderr, "invalid n_reduce=%u (must be 1..%d)\n", R,
-            MAX_REDUCE_TASKS);
+    LOG_ERROR("master", "invalid n_reduce=%u (must be 1..%d)", R,
+              MAX_REDUCE_TASKS);
     return -1;
   }
 
@@ -320,8 +383,11 @@ static int master_init_job(void) {
       .task_timeout_ms = master.config.task_timeout_ms,
   };
 
-  printf("[mapreduce-master] job init: M=%u R=%u input_dir=%s\n", M, R,
-         master.config.input_dir);
+  LOG_INFO("master",
+           "job init: M=%u R=%u input_dir=%s task_timeout_ms=%lld phase=%s", M,
+           R, master.config.input_dir,
+           (long long)master.config.task_timeout_ms,
+           phase_name(master.job.phase));
   return 0;
 }
 
@@ -337,8 +403,9 @@ static int master_init(void) {
   server_set_on_disconnect_cb(&master.server, master_on_disconnect, &master);
   server_set_on_periodic_cb(&master.server, master_periodic, &master);
 
-  printf("[mapreduce-master] listening on port %d (hz=%d)\n",
-         master.config.port, master.config.hz);
+  LOG_INFO("master", "listening on port %d hz=%d client_timeout_s=%d",
+           master.config.port, master.config.hz,
+           master.config.client_timeout_s);
   return EXIT_SUCCESS;
 }
 

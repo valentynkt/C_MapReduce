@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -10,6 +11,7 @@
 #include <unistd.h>
 
 #include "config.h"
+#include "log.h"
 #include "rpc.h"
 #include "util.h"
 #include "worker_map.h"
@@ -38,7 +40,7 @@ static int send_framed(int fd, const uint8_t *payload, size_t len) {
   memcpy(frame + FRAME_HDR_SIZE, payload, len);
   if (write_all(fd, frame, FRAME_HDR_SIZE + len) !=
       (ssize_t)(FRAME_HDR_SIZE + len)) {
-    perror("write");
+    LOG_ERROR("worker", "send_framed write_all failed: %s", strerror(errno));
     return -1;
   }
   return 0;
@@ -127,7 +129,7 @@ static int send_task_done(int fd, uint32_t task_id, uint32_t attempt_id,
 /* ----- task runners (stubs for slice 2; real I/O lands in slice 3) ----- */
 
 static uint8_t run_reduce_task(void) {
-  printf("[worker] run reduce task\n");
+  LOG_INFO("worker", "run_reduce_task (stub)");
   return 0;
 }
 
@@ -136,7 +138,7 @@ static uint8_t run_reduce_task(void) {
 static int client_init(int port, const char *host) {
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd == -1) {
-    perror("socket");
+    LOG_ERROR("worker", "socket: %s", strerror(errno));
     return -1;
   }
 
@@ -145,17 +147,18 @@ static int client_init(int port, const char *host) {
       .sin_port = htons(port),
   };
   if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
-    fprintf(stderr, "[worker] invalid host: %s\n", host);
+    LOG_ERROR("worker", "invalid host: %s", host);
     close(fd);
     return -1;
   }
 
   if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
-    perror("connect");
+    LOG_ERROR("worker", "connect %s:%d: %s", host, port, strerror(errno));
     close(fd);
     return -1;
   }
-  printf("[worker] connected to %s:%d (fd=%d)\n", host, port, fd);
+  LOG_INFO("worker", "connected to %s:%d fd=%d pid=%d", host, port, fd,
+           (int)getpid());
   return fd;
 }
 
@@ -174,23 +177,29 @@ int main(int argc, char *argv[]) {
   while (loop) {
     task_response_t resp;
     if (get_task_req(fd, &resp) != 0) {
-      fprintf(stderr, "[worker] get_task_req failed\n");
+      LOG_ERROR("worker", "get_task_req failed (master gone?)");
       rc = EXIT_FAILURE;
       break;
     }
 
     switch (resp.kind) {
     case RPC_TASK_MAP_RESP: {
-      printf("[worker] TASK_MAP_RESP: task_id=%u attempt=%u n_reduce=%u "
-             "path=%s\n",
-             resp.as.map.task_id, resp.as.map.attempt_id, resp.as.map.n_reduce,
-             resp.as.map.input_path);
+      LOG_INFO("worker",
+               "got MAP task=%u attempt=%u n_reduce=%u input=%s",
+               resp.as.map.task_id, resp.as.map.attempt_id,
+               resp.as.map.n_reduce, resp.as.map.input_path);
+      int64_t t0 = now_ms();
       int rv = worker_map_run(resp.as.map.task_id, resp.as.map.attempt_id,
                               resp.as.map.n_reduce, resp.as.map.input_path);
       uint8_t result = (rv == 0) ? 0 : 1;
+      LOG_INFO("worker",
+               "MAP task=%u attempt=%u finished result=%u elapsed_ms=%lld",
+               resp.as.map.task_id, resp.as.map.attempt_id, result,
+               (long long)(now_ms() - t0));
       if (send_task_done(fd, resp.as.map.task_id, resp.as.map.attempt_id,
                          result) != 0) {
-        fprintf(stderr, "[worker] send_task_done failed\n");
+        LOG_ERROR("worker", "send_task_done MAP task=%u failed",
+                  resp.as.map.task_id);
         rc = EXIT_FAILURE;
         loop = false;
         break;
@@ -199,20 +208,25 @@ int main(int argc, char *argv[]) {
       uint8_t ack_buf[MSG_MAX];
       size_t ack_buf_len;
       if (recv_framed(fd, ack_buf, sizeof ack_buf, &ack_buf_len) != 0) {
+        LOG_ERROR("worker", "recv ACK for MAP task=%u failed",
+                  resp.as.map.task_id);
         rc = EXIT_FAILURE;
         loop = false;
         break;
       }
 
-      rpc_kind_t map_rc;
-      if (rpc_peek_kind(ack_buf, ack_buf_len, &map_rc) != 0) {
-
+      rpc_kind_t ack_kind;
+      if (rpc_peek_kind(ack_buf, ack_buf_len, &ack_kind) != 0) {
+        LOG_ERROR("worker", "peek_kind ACK failed for MAP task=%u",
+                  resp.as.map.task_id);
         rc = EXIT_FAILURE;
         loop = false;
         break;
       }
-      if (map_rc != RPC_TASK_DONE_ACK) {
-        // What we do? Master does'nt send ACK back.
+      if (ack_kind != RPC_TASK_DONE_ACK) {
+        LOG_ERROR("worker",
+                  "expected RPC_TASK_DONE_ACK for MAP task=%u, got kind=%d",
+                  resp.as.map.task_id, (int)ack_kind);
         rc = EXIT_FAILURE;
         loop = false;
         break;
@@ -221,28 +235,29 @@ int main(int argc, char *argv[]) {
       break;
     }
     case RPC_TASK_REDUCE_RESP: {
-      printf("[worker] TASK_REDUCE_RESP: task_id=%u attempt=%u n_map=%u\n",
-             resp.as.reduce.task_id, resp.as.reduce.attempt_id,
-             resp.as.reduce.n_map);
+      LOG_INFO("worker", "got REDUCE task=%u attempt=%u n_map=%u",
+               resp.as.reduce.task_id, resp.as.reduce.attempt_id,
+               resp.as.reduce.n_map);
       uint8_t result = run_reduce_task();
       if (send_task_done(fd, resp.as.reduce.task_id, resp.as.reduce.attempt_id,
                          result) != 0) {
-        fprintf(stderr, "[worker] send_task_done failed\n");
+        LOG_ERROR("worker", "send_task_done REDUCE task=%u failed",
+                  resp.as.reduce.task_id);
         rc = EXIT_FAILURE;
         loop = false;
       }
       break;
     }
     case RPC_WAIT_RESP:
-      printf("[worker] WAIT_RESP: wait_ms=%u\n", resp.as.wait.wait_ms);
+      LOG_INFO("worker", "WAIT wait_ms=%u", resp.as.wait.wait_ms);
       sleep_ms(resp.as.wait.wait_ms);
       break;
     case RPC_DONE_RESP:
-      printf("[worker] DONE_RESP\n");
+      LOG_INFO("worker", "DONE — exiting cleanly");
       loop = false;
       break;
     default:
-      fprintf(stderr, "[worker] unexpected kind=%d\n", (int)resp.kind);
+      LOG_ERROR("worker", "unexpected RPC kind=%d", (int)resp.kind);
       rc = EXIT_FAILURE;
       loop = false;
       break;
@@ -250,5 +265,6 @@ int main(int argc, char *argv[]) {
   }
 
   close(fd);
+  LOG_INFO("worker", "exit rc=%d", rc);
   return rc;
 }
