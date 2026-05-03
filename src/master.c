@@ -298,6 +298,94 @@ static void master_on_disconnect(int fd, void *ud) {
 static void master_periodic(void *ud) {
   master_t *m = ud;
   m->now_realtime_ms = realtime_ms();
+  // We should consider migrating not by HZ but by time, like: (e.g., sweep
+  // task_timeout_ms / N apart)
+  if (m->server.cronloops % 10 != 0) {
+    return;
+  }
+  // check for timeout
+  if (m->job.phase == JOB_MAP) {
+
+    for (uint32_t i = 0; i < m->job.M; i++) {
+      // ToDo: is started_at_ms set as realtime or monotonic?
+      // could the history[0] be null? or wrong? maybe we need to check it
+      // here. m->maps[i].history[0] != NULL
+      if (m->maps[i].state != TASK_IN_PROGRESS) {
+        continue;
+      }
+      if (m->server.now_ms - m->maps[i].started_at_ms >
+          m->config.task_timeout_ms) {
+        LOG_WARN("master", "master_periodic, task=%d timeout", i);
+        task_t *t = &m->maps[i];
+        m->workers[t->owner_fd].has_task = false;
+
+        t->history[t->attempts_count - 1] = (attempt_record_t){
+            .attempt_id = t->current_attempt,
+            .worker_fd = t->owner_fd,
+            .end_status = ATTEMPT_TIMEOUT,
+            .ended_at_ms = master.server.now_ms,
+        };
+
+        if (t->attempts_count >= MAX_ATTEMPTS) {
+          t->state = TASK_FAILED;
+          m->job.phase = JOB_FAILED;
+          LOG_ERROR("master",
+                    "MAP task=%d FAILED terminal after %u attempts; phase -> "
+                    "JOB_FAILED",
+                    i, t->attempts_count);
+        } else {
+          t->state = TASK_PENDING;
+          LOG_WARN("master",
+                   "MAP task=%d attempt=%u failed fd=%d — reset to PENDING "
+                   "(%u/%u)",
+                   i, t->current_attempt, t->owner_fd, t->attempts_count,
+                   (uint32_t)MAX_ATTEMPTS);
+        }
+      }
+    }
+  }
+  if (m->job.phase == JOB_REDUCE) {
+
+    for (uint32_t i = 0; i < m->job.R; i++) {
+      // ToDo: is started_at_ms set as realtime or monotonic?
+      // could the history[0] be null? or wrong? maybe we need to check it
+      // here. m->maps[i].history[0] != NULL
+
+      if (m->reduces[i].state != TASK_IN_PROGRESS) {
+        continue;
+      }
+      if (m->server.now_ms - m->reduces[i].started_at_ms >
+          m->config.task_timeout_ms) {
+        LOG_WARN("master", "master_periodic, task=%d timeout", i);
+        task_t *t = &m->reduces[i];
+        m->workers[t->owner_fd].has_task = false;
+
+        t->history[t->attempts_count - 1] = (attempt_record_t){
+            .attempt_id = t->current_attempt,
+            .worker_fd = t->owner_fd,
+            .end_status = ATTEMPT_TIMEOUT,
+            .ended_at_ms = master.server.now_ms,
+        };
+
+        if (t->attempts_count >= MAX_ATTEMPTS) {
+          t->state = TASK_FAILED;
+          m->job.phase = JOB_FAILED;
+          LOG_ERROR(
+              "master",
+              "REDUCE task=%d FAILED terminal after %u attempts; phase -> "
+              "JOB_FAILED",
+              i, t->attempts_count);
+        } else {
+          t->state = TASK_PENDING;
+          LOG_WARN("master",
+                   "REDUCE task=%d attempt=%u failed fd=%d — reset to PENDING "
+                   "(%u/%u)",
+                   i, t->current_attempt, t->owner_fd, t->attempts_count,
+                   (uint32_t)MAX_ATTEMPTS);
+        }
+      }
+    }
+  }
 }
 
 static int input_filter(const struct dirent *e) { return e->d_name[0] != '.'; }
