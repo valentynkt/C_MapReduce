@@ -109,16 +109,30 @@ static int master_handle_get_task(int fd) {
       if (server_send(&master.server, fd, (const char *)buf,
                       (uint32_t)out_len) != 0)
         return -1;
-      LOG_INFO("master",
-               "WAIT fd=%d phase=JOB_MAP wait_ms=%u maps_done=%u/%u", fd,
-               msg.wait_ms, master.job.maps_done, master.job.M);
+      LOG_INFO("master", "WAIT fd=%d phase=JOB_MAP wait_ms=%u maps_done=%u/%u",
+               fd, msg.wait_ms, master.job.maps_done, master.job.M);
     }
     break;
   }
-  case JOB_REDUCE:
+  case JOB_REDUCE: {
+    uint8_t buf[MSG_MAX];
+    size_t out_len;
+    // busy waiting stub, for the worker.
+
+    rpc_wait_resp_t msg = (rpc_wait_resp_t){
+        .wait_ms = (uint32_t)(master.job.task_timeout_ms / 2),
+    };
+    if (rpc_encode_wait_resp(buf, sizeof buf, &msg, &out_len) != 0)
+      return -1;
+
+    if (server_send(&master.server, fd, (const char *)buf, (uint32_t)out_len) !=
+        0)
+      return -1;
+
     LOG_WARN("master", "GetTask fd=%d phase=JOB_REDUCE — not yet implemented",
              fd);
     break;
+  }
   case JOB_DONE:
     LOG_WARN("master", "GetTask fd=%d phase=JOB_DONE — not yet implemented",
              fd);
@@ -217,8 +231,8 @@ static int master_handle_task_done(int fd, const rpc_task_done_req_t *msg) {
     break;
   }
   case JOB_REDUCE:
-    LOG_WARN("master",
-             "TaskDone fd=%d phase=JOB_REDUCE — not yet implemented", fd);
+    LOG_WARN("master", "TaskDone fd=%d phase=JOB_REDUCE — not yet implemented",
+             fd);
     return -1;
   case JOB_DONE:
     LOG_WARN("master", "TaskDone fd=%d phase=JOB_DONE — unexpected", fd);
@@ -353,8 +367,7 @@ static int master_init_job(void) {
   free_scandir_entries(entries, n);
 
   if (M == 0) {
-    LOG_ERROR("master", "no input splits found in %s",
-              master.config.input_dir);
+    LOG_ERROR("master", "no input splits found in %s", master.config.input_dir);
     return -1;
   }
 
@@ -385,8 +398,7 @@ static int master_init_job(void) {
 
   LOG_INFO("master",
            "job init: M=%u R=%u input_dir=%s task_timeout_ms=%lld phase=%s", M,
-           R, master.config.input_dir,
-           (long long)master.config.task_timeout_ms,
+           R, master.config.input_dir, (long long)master.config.task_timeout_ms,
            phase_name(master.job.phase));
   return 0;
 }
