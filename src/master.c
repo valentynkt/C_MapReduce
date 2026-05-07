@@ -138,9 +138,12 @@ static void maybe_advance_phase(void) {
 }
 static int choose_available_task(int fd, task_kind_e kind) {
   int choosen = -1;
+  assert(kind == TASK_KIND_MAP || kind == TASK_KIND_REDUCE);
+  uint32_t n_tasks = (kind == TASK_KIND_MAP) ? master.job.M : master.job.R;
+  task_t *tasks = (kind == TASK_KIND_MAP) ? master.maps : master.reduces;
 
-  for (uint32_t i = 0; i < master.job.M; i++) {
-    task_t *task = &master.maps[i];
+  for (uint32_t i = 0; i < n_tasks; i++) {
+    task_t *task = &tasks[i];
     int64_t now_ms = master.server.now_ms;
     if (task->state == TASK_PENDING) {
       task->state = TASK_IN_PROGRESS;
@@ -181,12 +184,15 @@ static int wait_for_available_tasks(int fd, uint8_t *buf, size_t *out_len,
   if (rpc_encode_wait_resp(buf, sizeof buf, &msg, out_len) != 0)
     return -1;
   if (kind == TASK_KIND_MAP) {
-    LOG_INFO("master", "WAIT fd=%d phase=JOB_MAP wait_ms=%u maps_done=%u/%u",
+    LOG_INFO("master",
+             "WAIT for available tasks fd=%d phase=JOB_MAP wait_ms=%u "
+             "maps_done=%u/%u",
              fd, msg.wait_ms, master.job.maps_done, master.job.M);
   } else {
     LOG_INFO("master",
-             "WAIT fd=%d phase=JOB_REDUCE wait_ms=%u reduces_done=%u/%u", fd,
-             msg.wait_ms, master.job.reduces_done, master.job.R);
+             "WAIT for available tasks fd=%d phase=JOB_REDUCE wait_ms=%u "
+             "reduces_done=%u/%u",
+             fd, msg.wait_ms, master.job.reduces_done, master.job.R);
   }
   return 0;
 }
@@ -220,7 +226,7 @@ static int master_handle_get_task(int fd) {
     break;
   }
   case JOB_REDUCE: {
-    int choosen = choose_available_task(fd, TASK_KIND_MAP);
+    int choosen = choose_available_task(fd, TASK_KIND_REDUCE);
 
     if (choosen >= 0) {
       task_t *t = &master.maps[choosen];
