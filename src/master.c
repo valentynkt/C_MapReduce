@@ -136,38 +136,64 @@ static void maybe_advance_phase(void) {
     master.job.phase = JOB_DONE;
   }
 }
+static int choose_available_task(int fd, task_kind_e kind) {
+  int choosen = -1;
+
+  for (uint32_t i = 0; i < master.job.M; i++) {
+    task_t *task = &master.maps[i];
+    int64_t now_ms = master.server.now_ms;
+    if (task->state == TASK_PENDING) {
+      task->state = TASK_IN_PROGRESS;
+      task->current_attempt += 1;
+      task->attempts_count += 1;
+      task->owner_fd = fd;
+      task->started_at_ms = now_ms;
+      task->history[task->attempts_count - 1] =
+          (attempt_record_t){.attempt_id = task->current_attempt,
+                             .worker_fd = fd,
+                             .started_at_ms = now_ms,
+                             .end_status = ATTEMPT_RUNNING,
+                             .ended_at_ms = 0};
+      worker_t *worker = &master.workers[fd];
+      worker->has_task = true;
+      worker->current_kind = kind;
+      worker->current_task_id = i;
+      worker->current_attempt_id = task->current_attempt;
+      choosen = (int)i;
+      break;
+    }
+  }
+  return choosen;
+}
+
+static int wait_for_nopending_tasks(int fd, uint8_t *buf, size_t *out_len,
+                                    task_kind_e kind) {
+  /* No PENDING. If maps_done < M, some are still running -> WAIT.
+     If maps_done == M, TaskDone failed to advance the phase -> bug. */
+  assert(master.job.maps_done < master.job.M);
+  assert(kind == TASK_KIND_MAP || kind == TASK_KIND_REDUCE);
+  rpc_wait_resp_t msg = (rpc_wait_resp_t){
+      .wait_ms = (uint32_t)(master.job.task_timeout_ms / 2),
+  };
+  if (rpc_encode_wait_resp(buf, sizeof buf, &msg, out_len) != 0)
+    return -1;
+  if (kind == TASK_KIND_MAP) {
+    LOG_INFO("master", "WAIT fd=%d phase=JOB_MAP wait_ms=%u maps_done=%u/%u",
+             fd, msg.wait_ms, master.job.maps_done, master.job.M);
+  } else {
+    LOG_INFO("master",
+             "WAIT fd=%d phase=JOB_REDUCE wait_ms=%u reduces_done=%u/%u", fd,
+             msg.wait_ms, master.job.reduces_done, master.job.R);
+  }
+  return 0;
+}
 
 static int master_handle_get_task(int fd) {
   uint8_t buf[MSG_MAX];
   size_t out_len;
   switch (master.job.phase) {
   case JOB_MAP: {
-    int choosen = -1;
-    for (uint32_t i = 0; i < master.job.M; i++) {
-      task_t *task = &master.maps[i];
-      int64_t now_ms = master.server.now_ms;
-      if (task->state == TASK_PENDING) {
-        task->state = TASK_IN_PROGRESS;
-        task->current_attempt += 1;
-        task->attempts_count += 1;
-        task->owner_fd = fd;
-        task->started_at_ms = now_ms;
-        task->history[task->attempts_count - 1] =
-            (attempt_record_t){.attempt_id = task->current_attempt,
-                               .worker_fd = fd,
-                               .started_at_ms = now_ms,
-                               .end_status = ATTEMPT_RUNNING,
-                               .ended_at_ms = 0};
-        worker_t *worker = &master.workers[fd];
-        worker->has_task = true;
-        worker->current_kind = TASK_KIND_MAP;
-        worker->current_task_id = i;
-        worker->current_attempt_id = task->current_attempt;
-        choosen = (int)i;
-        break;
-      }
-    }
-
+    int choosen = choose_available_task(fd, TASK_KIND_MAP);
     if (choosen >= 0) {
       task_t *t = &master.maps[choosen];
       rpc_task_map_resp_t msg = (rpc_task_map_resp_t){
@@ -184,30 +210,34 @@ static int master_handle_get_task(int fd) {
                "assigned MAP task=%d attempt=%u fd=%d input=%s n_reduce=%u",
                choosen, t->current_attempt, fd, t->input_path, master.job.R);
     } else {
-      /* No PENDING. If maps_done < M, some are still running -> WAIT.
-         If maps_done == M, TaskDone failed to advance the phase -> bug. */
-      assert(master.job.maps_done < master.job.M);
-      rpc_wait_resp_t msg = (rpc_wait_resp_t){
-          .wait_ms = (uint32_t)(master.job.task_timeout_ms / 2),
-      };
-      if (rpc_encode_wait_resp(buf, sizeof buf, &msg, &out_len) != 0)
+      if (wait_for_nopending_tasks(fd, buf, &out_len, TASK_KIND_MAP) != 0) {
         return -1;
-      LOG_INFO("master", "WAIT fd=%d phase=JOB_MAP wait_ms=%u maps_done=%u/%u",
-               fd, msg.wait_ms, master.job.maps_done, master.job.M);
+      }
     }
     break;
   }
   case JOB_REDUCE: {
-    // busy waiting stub, for the worker.
+    int choosen = choose_available_task(fd, TASK_KIND_MAP);
 
-    rpc_wait_resp_t msg = (rpc_wait_resp_t){
-        .wait_ms = (uint32_t)(master.job.task_timeout_ms / 2),
-    };
-    if (rpc_encode_wait_resp(buf, sizeof buf, &msg, &out_len) != 0)
-      return -1;
+    if (choosen >= 0) {
+      task_t *t = &master.maps[choosen];
+      rpc_task_reduce_resp_t msg =
+          (rpc_task_reduce_resp_t){.task_id = (uint32_t)choosen,
+                                   .attempt_id = t->current_attempt,
+                                   .n_map = master.job.M};
 
-    LOG_WARN("master", "GetTask fd=%d phase=JOB_REDUCE — not yet implemented",
-             fd);
+      if (rpc_encode_task_reduce_resp(buf, sizeof buf, &msg, &out_len) != 0)
+        return -1;
+
+      LOG_INFO("master", "assigned REDUCE task=%d attempt=%u fd=%d  n_map=%u",
+               choosen, t->current_attempt, fd, master.job.M);
+
+    } else {
+
+      if (wait_for_nopending_tasks(fd, buf, &out_len, TASK_KIND_REDUCE) != 0) {
+        return -1;
+      }
+    }
     break;
   }
   case JOB_DONE:
