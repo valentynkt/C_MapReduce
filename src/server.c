@@ -1,6 +1,7 @@
 #include "server.h"
 #include "config.h"
 #include "event_loop.h"
+#include "log.h"
 #include "util.h"
 #include <arpa/inet.h>
 #include <errno.h>
@@ -43,13 +44,13 @@ static void setup_signal_handlers(void) {
 static int create_listener(int port, int backlog) {
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd == -1) {
-    perror("socket");
+    LOG_ERROR("server", "socket: %s", strerror(errno));
     return -1;
   }
 
   int opt = 1;
   if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
-    perror("setsockopt");
+    LOG_ERROR("server", "setsockopt: %s", strerror(errno));
     goto fail;
   }
 
@@ -60,12 +61,12 @@ static int create_listener(int port, int backlog) {
   };
 
   if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
-    perror("bind");
+    LOG_ERROR("server", "bind: %s", strerror(errno));
     goto fail;
   }
 
   if (listen(fd, backlog) == -1) {
-    perror("listen");
+    LOG_ERROR("server", "listen: %s", strerror(errno));
     goto fail;
   }
 
@@ -83,7 +84,7 @@ fail:
 /* 3. Per-client lifecycle */
 
 static void remove_client(server_t *s, event_loop_t *el, int fd) {
-  printf("client disconnected (fd=%d)\n", fd);
+  LOG_INFO("server", "client disconnected fd=%d", fd);
   el_remove(el, fd);
   close(fd);
 
@@ -120,7 +121,7 @@ static bool queue_write(server_t *s, event_loop_t *el, int fd, const char *data,
     ssize_t n = write(fd, c->wbuf + c->woff, c->wlen - c->woff);
     if (n == -1) {
       if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-        perror("write");
+        LOG_ERROR("server", "write fd=%d: %s", fd, strerror(errno));
         remove_client(s, el, fd);
         return false;
       }
@@ -191,7 +192,7 @@ static void on_write(event_loop_t *el, int fd) {
   if (n == -1) {
     if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
       return;
-    perror("write");
+    LOG_ERROR("server", "write fd=%d: %s", fd, strerror(errno));
     remove_client(s, el, fd);
     return;
   }
@@ -224,7 +225,7 @@ static void on_read(event_loop_t *el, int fd) {
   if (n == -1) {
     if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
       return;
-    perror("read");
+    LOG_ERROR("server", "read fd=%d: %s", fd, strerror(errno));
     remove_client(s, el, fd);
     return;
   }
@@ -240,11 +241,11 @@ static void on_accept(event_loop_t *el, int server_fd) {
   int fd = accept(server_fd, NULL, NULL);
   if (fd == -1) {
     if (errno != EAGAIN && errno != EWOULDBLOCK)
-      perror("accept");
+      LOG_ERROR("server", "accept: %s", strerror(errno));
     return;
   }
   if (fd >= MAX_FDS) {
-    fprintf(stderr, "fd %d >= MAX_FDS, rejecting\n", fd);
+    LOG_WARN("server", "fd=%d >= MAX_FDS=%d, rejecting", fd, MAX_FDS);
     close(fd);
     return;
   }
@@ -255,7 +256,7 @@ static void on_accept(event_loop_t *el, int server_fd) {
 
   s->clients[fd] = (client_t){.active = true, .last_active_ms = s->now_ms};
   s->clients_count++;
-  printf("client connected (fd=%d)\n", fd);
+  LOG_INFO("server", "client connected fd=%d", fd);
 
   if (el_add(el, fd, on_read) == -1) {
     close(fd);
@@ -278,13 +279,13 @@ static void on_shutdown(event_loop_t *el, int fd) {
     for (ssize_t i = 0; i < n; i++) {
       switch (buf[i]) {
       case SIGINT:
-        fprintf(stderr, "Received SIGINT, shutting down...\n");
+        LOG_INFO("server", "received SIGINT, shutting down");
         break;
       case SIGTERM:
-        fprintf(stderr, "Received SIGTERM, shutting down...\n");
+        LOG_INFO("server", "received SIGTERM, shutting down");
         break;
       default:
-        fprintf(stderr, "Received signal %d, shutting down...\n", buf[i]);
+        LOG_INFO("server", "received signal %d, shutting down", buf[i]);
         break;
       }
     }
@@ -302,7 +303,8 @@ static void check_client_timeouts(server_t *s, event_loop_t *el) {
     found++;
     int64_t idle_s = (s->now_ms - s->clients[i].last_active_ms) / 1000;
     if (idle_s >= s->client_timeout_s) {
-      printf("client timed out (fd=%d, idle=%llds)\n", i, (long long)idle_s);
+      LOG_WARN("server", "client timed out fd=%d idle_s=%lld", i,
+               (long long)idle_s);
       remove_client(s, el, i);
     }
   }

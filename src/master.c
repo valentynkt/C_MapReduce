@@ -179,9 +179,7 @@ static int master_handle_get_task(int fd) {
       memcpy(msg.input_path, t->input_path, t->input_path_len);
       if (rpc_encode_task_map_resp(buf, sizeof buf, &msg, &out_len) != 0)
         return -1;
-      if (server_send(&master.server, fd, (const char *)buf,
-                      (uint32_t)out_len) != 0)
-        return -1;
+
       LOG_INFO("master",
                "assigned MAP task=%d attempt=%u fd=%d input=%s n_reduce=%u",
                choosen, t->current_attempt, fd, t->input_path, master.job.R);
@@ -201,6 +199,7 @@ static int master_handle_get_task(int fd) {
   }
   case JOB_REDUCE: {
     // busy waiting stub, for the worker.
+
     rpc_wait_resp_t msg = (rpc_wait_resp_t){
         .wait_ms = (uint32_t)(master.job.task_timeout_ms / 2),
     };
@@ -216,15 +215,13 @@ static int master_handle_get_task(int fd) {
       return -1;
     }
 
-    LOG_WARN("master", "GetTask fd=%d phase=JOB_DONE — not yet implemented",
-             fd);
+    LOG_INFO("master", "GetTask fd=%d phase=JOB_DONE", fd);
     break;
   case JOB_FAILED:
     if (rpc_encode_done_resp(buf, sizeof buf, &out_len) != 0) {
       return -1;
     }
-    LOG_WARN("master", "GetTask fd=%d phase=JOB_FAILED — not yet implemented",
-             fd);
+    LOG_INFO("master", "GetTask fd=%d phase=JOB_FAILED", fd);
     break;
   default:
     LOG_ERROR("master", "GetTask fd=%d invalid phase=%d", fd,
