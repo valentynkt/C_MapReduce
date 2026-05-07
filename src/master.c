@@ -166,7 +166,7 @@ static int choose_available_task(int fd, task_kind_e kind) {
   return choosen;
 }
 
-static int wait_for_nopending_tasks(int fd, uint8_t *buf, size_t *out_len,
+static int wait_for_available_tasks(int fd, uint8_t *buf, size_t *out_len,
                                     task_kind_e kind) {
   /* No PENDING. If maps_done < M, some are still running -> WAIT.
      If maps_done == M, TaskDone failed to advance the phase -> bug. */
@@ -210,7 +210,7 @@ static int master_handle_get_task(int fd) {
                "assigned MAP task=%d attempt=%u fd=%d input=%s n_reduce=%u",
                choosen, t->current_attempt, fd, t->input_path, master.job.R);
     } else {
-      if (wait_for_nopending_tasks(fd, buf, &out_len, TASK_KIND_MAP) != 0) {
+      if (wait_for_available_tasks(fd, buf, &out_len, TASK_KIND_MAP) != 0) {
         return -1;
       }
     }
@@ -234,7 +234,7 @@ static int master_handle_get_task(int fd) {
 
     } else {
 
-      if (wait_for_nopending_tasks(fd, buf, &out_len, TASK_KIND_REDUCE) != 0) {
+      if (wait_for_available_tasks(fd, buf, &out_len, TASK_KIND_REDUCE) != 0) {
         return -1;
       }
     }
@@ -265,70 +265,96 @@ static int master_handle_get_task(int fd) {
   return 0;
 }
 
-static int master_handle_task_done(int fd, const rpc_task_done_req_t *msg) {
+static int task_done_helper(int fd, const rpc_task_done_req_t *msg) {
+  job_phase_e phase = master.job.phase;
+  assert(phase == JOB_MAP || phase == JOB_REDUCE);
+  int current_task_id = master.workers[fd].current_task_id;
+  task_t *t;
 
-  switch (master.job.phase) {
-  case JOB_MAP: {
-    // ToDO: Probably could be extracted to reuse the similar logic in Reduce
-    int current_task_id = master.workers[fd].current_task_id;
-    task_t *t = &master.maps[current_task_id];
+  if (phase == JOB_MAP) {
+    t = &master.maps[current_task_id];
+  } else {
 
-    uint8_t buf[MSG_MAX];
-    size_t out_len;
+    t = &master.reduces[current_task_id];
+  }
 
-    if (rpc_encode_task_done_ack(buf, sizeof buf, &out_len) != 0)
+  uint8_t buf[MSG_MAX];
+  size_t out_len;
+
+  if (rpc_encode_task_done_ack(buf, sizeof buf, &out_len) != 0)
+    return -1;
+
+  // ignore the result, zombie process, send ack.
+  if (msg->attempt_id != t->current_attempt) {
+    LOG_WARN("master",
+             "stale TaskDone fd=%d task=%u attempt=%u (current=%u) — ack and "
+             "drop",
+             fd, msg->task_id, msg->attempt_id, t->current_attempt);
+
+    if (server_send(&master.server, fd, (const char *)buf, (uint32_t)out_len) !=
+        0) {
+
+      // ignore the result, zombie process;
+      master.workers[fd].has_task = false;
       return -1;
-
-    if (msg->attempt_id != t->current_attempt) {
-      LOG_WARN("master",
-               "stale TaskDone fd=%d task=%u attempt=%u (current=%u) — ack and "
-               "drop",
-               fd, msg->task_id, msg->attempt_id, t->current_attempt);
-
-      if (server_send(&master.server, fd, (const char *)buf,
-                      (uint32_t)out_len) != 0) {
-
-        // ignore the result, zombie process;
-        master.workers[fd].has_task = false;
-        return -1;
-      }
-      return 0;
     }
+    return 0;
+  }
+  // Task Success
+  if (msg->result == 0) {
+    t->owner_fd = -1;
+    t->state = TASK_COMPLETED;
 
-    // Task Success
-    if (msg->result == 0) {
-      t->owner_fd = -1;
-      t->state = TASK_COMPLETED;
+    t->history[t->attempts_count - 1] = (attempt_record_t){
+        .attempt_id = t->current_attempt,
+        .worker_fd = fd,
+        .end_status = ATTEMPT_SUCCESS,
+        .ended_at_ms = master.server.now_ms,
+    };
 
-      t->history[t->attempts_count - 1] = (attempt_record_t){
-          .attempt_id = t->current_attempt,
-          .worker_fd = fd,
-          .end_status = ATTEMPT_SUCCESS,
-          .ended_at_ms = master.server.now_ms,
-      };
-
+    if (phase == JOB_MAP) {
       master.job.maps_done += 1;
       LOG_INFO("master",
                "MAP task=%d attempt=%u COMPLETED fd=%d (maps_done=%u/%u)",
                current_task_id, t->current_attempt, fd, master.job.maps_done,
                master.job.M);
-      maybe_advance_phase();
-
     } else {
+      master.job.reduces_done += 1;
+      LOG_INFO("master",
+               "REDUCE task=%d attempt=%u COMPLETED fd=%d (reduces_done=%u/%u)",
+               current_task_id, t->current_attempt, fd, master.job.reduces_done,
+               master.job.R);
+    }
+    maybe_advance_phase();
+  } else {
+    if (phase == JOB_MAP)
       task_attempt_ended(t, ATTEMPT_FAILED, fd, master.server.now_ms, "MAP",
                          (uint32_t)current_task_id);
-    }
+    else
 
-    // Send ACK
-    if (server_send(&master.server, fd, (const char *)buf, (uint32_t)out_len) !=
-        0)
-      return -1;
-    master.workers[fd].has_task = false;
+      task_attempt_ended(t, ATTEMPT_FAILED, fd, master.server.now_ms, "REDUCE",
+                         (uint32_t)current_task_id);
+  }
+
+  // Send ACK
+  if (server_send(&master.server, fd, (const char *)buf, (uint32_t)out_len) !=
+      0)
+    return -1;
+
+  master.workers[fd].has_task = false;
+  return 0;
+}
+
+static int master_handle_task_done(int fd, const rpc_task_done_req_t *msg) {
+
+  switch (master.job.phase) {
+  case JOB_MAP: {
+    task_done_helper(fd, msg);
     break;
   }
   case JOB_REDUCE:
-    LOG_WARN("master", "TaskDone fd=%d phase=JOB_REDUCE — not yet implemented",
-             fd);
+    task_done_helper(fd, msg);
+    break;
     return -1;
   case JOB_DONE:
     LOG_WARN("master", "TaskDone fd=%d phase=JOB_DONE — unexpected", fd);
