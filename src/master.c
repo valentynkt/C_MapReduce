@@ -170,8 +170,11 @@ static int wait_for_available_tasks(int fd, uint8_t *buf, size_t *out_len,
                                     task_kind_e kind) {
   /* No PENDING. If maps_done < M, some are still running -> WAIT.
      If maps_done == M, TaskDone failed to advance the phase -> bug. */
-  assert(master.job.maps_done < master.job.M);
-  assert(kind == TASK_KIND_MAP || kind == TASK_KIND_REDUCE);
+  bool assert_guard =
+      (kind == TASK_KIND_MAP && master.job.maps_done < master.job.M) ||
+      (kind == TASK_KIND_REDUCE && master.job.reduces_done < master.job.R);
+
+  assert(assert_guard);
   rpc_wait_resp_t msg = (rpc_wait_resp_t){
       .wait_ms = (uint32_t)(master.job.task_timeout_ms / 2),
   };
