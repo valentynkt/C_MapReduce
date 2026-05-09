@@ -237,7 +237,8 @@ int main(int argc, char *argv[]) {
       LOG_INFO("worker", "got REDUCE task=%u attempt=%u n_map=%u",
                resp.as.reduce.task_id, resp.as.reduce.attempt_id,
                resp.as.reduce.n_map);
-      uint8_t result = run_reduce_task();
+      int rv = run_reduce_task();
+      uint8_t result = (rv == 0) ? 0 : 1;
       if (send_task_done(fd, resp.as.reduce.task_id, resp.as.reduce.attempt_id,
                          result) != 0) {
         LOG_ERROR("worker", "send_task_done REDUCE task=%u failed",
