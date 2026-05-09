@@ -229,7 +229,7 @@ static int master_handle_get_task(int fd) {
     int choosen = choose_available_task(fd, TASK_KIND_REDUCE);
 
     if (choosen >= 0) {
-      task_t *t = &master.maps[choosen];
+      task_t *t = &master.reduces[choosen];
       rpc_task_reduce_resp_t msg =
           (rpc_task_reduce_resp_t){.task_id = (uint32_t)choosen,
                                    .attempt_id = t->current_attempt,
