@@ -77,6 +77,7 @@ int worker_map_run(uint32_t task_id, uint32_t attempt_id, uint32_t n_reduce,
     int n = snprintf(temp_paths[i], MAPREDUCE_PATH_MAX,
                      "intermediate/mr-%u-%u.tmp.%d.%u", task_id /* X */,
                      i /* Y */, (int)getpid(), attempt_id);
+
     if (n < 0 || (size_t)n >= MAPREDUCE_PATH_MAX) {
       LOG_ERROR("worker.map", "temp path truncation for task=%u y=%u", task_id,
                 i);
@@ -122,8 +123,9 @@ int worker_map_run(uint32_t task_id, uint32_t attempt_id, uint32_t n_reduce,
   /* Close pass: always run, regardless of rc, so we don't leak fds. */
   for (uint32_t y = 0; y < n_reduce; y++) {
     if (ferror(handles[y])) {
-      LOG_ERROR("worker.map", "ferror set on temp y=%u (path=%s) — write "
-                              "failure during tokenize",
+      LOG_ERROR("worker.map",
+                "ferror set on temp y=%u (path=%s) — write "
+                "failure during tokenize",
                 y, temp_paths[y]);
       rc = -1;
     }

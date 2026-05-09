@@ -3,7 +3,9 @@
 #include "log.h"
 #include "task.h"
 #include "util.h"
+#include <assert.h>
 #include <errno.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,7 +26,7 @@ typedef struct {
   size_t capacity;
 } d_array_t;
 
-static d_array_t *init_container(void) {
+static d_array_t *init_array(void) {
   d_array_t *array = malloc(sizeof(*array));
   if (!array) {
     return NULL;
@@ -119,4 +121,113 @@ static int read_records_file(const char *path, d_array_t *array) {
     rc = -1;
   }
   return rc;
+}
+
+static int comp(const void *a, const void *b) {
+  char *a_key = (*(record_t *)a).key;
+  char *b_key = (*(record_t *)b).key;
+  return strcmp(a_key, b_key);
+}
+
+static void fold_word_count(char *key, const char **values, size_t n_value,
+                            FILE *out) {
+  for (size_t i = 0; i < n_value; i++) {
+  }
+}
+
+int worker_reduce_run(uint32_t task_id, uint32_t attempt_id, uint32_t n_map) {
+
+  LOG_INFO("worker.reduce", "run start task=%u attempt=%u n_map=%u  pid=%d",
+           task_id, attempt_id, n_map, (int)getpid());
+  assert(n_map > 0);
+  FILE *handle = {0};
+  char input_paths[MAX_MAP_TASKS][MAPREDUCE_PATH_MAX];
+  char temp_path[MAPREDUCE_PATH_MAX];
+  char final_path[MAPREDUCE_PATH_MAX];
+  d_array_t *array = init_array();
+  uint32_t i = 0;
+  for (; i < n_map; i++) {
+    int n = snprintf(input_paths[i], MAPREDUCE_PATH_MAX,
+                     "intermediate/mr-%u-%u", i /* X */, task_id /* Y */);
+
+    if (n < 0 || (size_t)n >= MAPREDUCE_PATH_MAX) {
+      LOG_ERROR("worker.reduce", "input path truncation for task=%u x=%u",
+                task_id, i);
+      goto cleanup;
+    }
+
+    if (read_records_file(input_paths[i], array) != 0) {
+      goto cleanup;
+    }
+  }
+  qsort(array->records, array->count, sizeof(record_t *), comp);
+  // temp_path
+  int temp_path_n =
+      snprintf(temp_path, MAPREDUCE_PATH_MAX, "output/mr-out-%u.tmp.%d.%u",
+               task_id /* Y */, (int)getpid(), attempt_id);
+
+  if (temp_path_n < 0 || (size_t)temp_path_n >= MAPREDUCE_PATH_MAX) {
+    LOG_ERROR("worker.reduce", "temp path truncation for task=%u", task_id);
+    goto cleanup;
+  }
+  // final_path
+  int final_path_n = snprintf(final_path, MAPREDUCE_PATH_MAX,
+                              "output/mr-out-%u", task_id /* Y */);
+
+  if (final_path_n < 0 || (size_t)final_path_n >= MAPREDUCE_PATH_MAX) {
+    LOG_ERROR("worker.reduce", "final path truncation for task=%u", task_id);
+    goto cleanup;
+  }
+
+  handle = fopen(temp_path, "w");
+  if (!handle) {
+    LOG_ERROR("worker.reduce", "fopen(%s): %s", temp_path, strerror(errno));
+    goto cleanup;
+  }
+
+  // Group walk + fold
+  const char *vals[1024];
+  char *cur_key;
+  size_t n_vals = 0;
+
+  for (size_t i = 0; i < array->count; i++) {
+    record_t *record = array->records[i];
+    if (cur_key == NULL) {
+      cur_key = record->key;
+      vals[n_vals] = record->key;
+      n_vals += 1;
+    } else if (strcmp(record->key, cur_key) == 0) {
+      vals[n_vals] = record->key;
+      n_vals += 1;
+    } else {
+      fold_word_count(cur_key, vals, n_vals, handle);
+      cur_key = record->key;
+      vals[0] = record->value;
+      n_vals = 1;
+    }
+  }
+  fold_word_count(cur_key, vals, n_vals, handle);
+  if (handle) {
+    fclose(handle);
+  }
+  arr_free(array);
+
+  /* Rename pass: only run if everything was clean. */
+  if (rename(temp_path, final_path) != 0) {
+    LOG_ERROR("worker.reduce", "rename(%s -> %s): %s", temp_path, final_path,
+              strerror(errno));
+    return -1;
+  }
+  LOG_INFO("worker.reduce", "renamed temp file:%s to final file:%s for task=%u",
+           temp_path, final_path, task_id);
+
+  LOG_INFO("worker.reduce", "run end task=%u attempt=%u ", task_id, attempt_id);
+  return 0;
+
+cleanup:
+  if (handle) {
+    fclose(handle);
+  }
+  arr_free(array);
+  return -1;
 }
