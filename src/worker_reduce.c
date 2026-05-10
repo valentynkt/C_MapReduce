@@ -194,22 +194,22 @@ int worker_reduce_run(uint32_t task_id, uint32_t attempt_id, uint32_t n_map) {
 
   // Group walk + fold
   const char *vals[1024];
-  char *cur_key;
+  char *cur_key = NULL;
   size_t n_vals = 0;
 
   for (size_t i = 0; i < array->count; i++) {
     record_t *record = array->records[i];
     if (cur_key == NULL) {
       cur_key = record->key;
-      vals[n_vals] = record->key;
+      vals[n_vals] = record->value;
       n_vals += 1;
     } else if (strcmp(record->key, cur_key) == 0) {
-      vals[n_vals] = record->key;
+      vals[n_vals] = record->value;
       n_vals += 1;
     } else {
       fold_word_count(cur_key, vals, n_vals, handle);
       cur_key = record->key;
-      vals[0] = record->key;
+      vals[0] = record->value;
       n_vals = 1;
     }
   }
