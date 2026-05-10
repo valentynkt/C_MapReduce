@@ -17,8 +17,6 @@
 #include "worker_map.h"
 #include "worker_reduce.h"
 
-#define MAX_TOKENS_WORD 100
-
 /* ----- helpers ----- */
 
 static void sleep_ms(uint32_t ms) {
@@ -63,11 +61,7 @@ static int recv_framed(int fd, uint8_t *buf, size_t cap, size_t *out_len) {
   return 0;
 }
 
-/* ----- decoded GetTask response -----
-
-   Tagged union: `kind` is the discriminator; `as` holds the per-kind decoded
-   body. DONE_RESP has no payload, so it isn't represented in `as` and the
-   union members are not read for that kind. */
+/* Decoded GetTask response. `kind` discriminates `as`; DONE_RESP has no body. */
 typedef struct {
   rpc_kind_t kind;
   union {
@@ -127,7 +121,34 @@ static int send_task_done(int fd, uint32_t task_id, uint32_t attempt_id,
   return 0;
 }
 
-/* ----- task runners (stubs for slice 2; real I/O lands in slice 3) ----- */
+/* Send TaskDone(result) and verify the master's TASK_DONE_ACK. 0 on success,
+   -1 on any RPC failure (logged with kind_label = "MAP" | "REDUCE"). */
+static int report_task_done(int fd, uint32_t task_id, uint32_t attempt_id,
+                            uint8_t result, const char *kind_label) {
+  if (send_task_done(fd, task_id, attempt_id, result) != 0) {
+    LOG_ERROR("worker", "%s task=%u: send TaskDone failed", kind_label, task_id);
+    return -1;
+  }
+
+  uint8_t ack[MSG_MAX];
+  size_t  ack_len;
+  if (recv_framed(fd, ack, sizeof ack, &ack_len) != 0) {
+    LOG_ERROR("worker", "%s task=%u: recv ACK failed", kind_label, task_id);
+    return -1;
+  }
+
+  rpc_kind_t kind;
+  if (rpc_peek_kind(ack, ack_len, &kind) != 0) {
+    LOG_ERROR("worker", "%s task=%u: peek ACK kind failed", kind_label, task_id);
+    return -1;
+  }
+  if (kind != RPC_TASK_DONE_ACK) {
+    LOG_ERROR("worker", "%s task=%u: expected TASK_DONE_ACK, got kind=%d",
+              kind_label, task_id, (int)kind);
+    return -1;
+  }
+  return 0;
+}
 
 /* ----- connection setup -----
    Returns the connected fd on success, -1 on error. */
@@ -180,95 +201,39 @@ int main(int argc, char *argv[]) {
 
     switch (resp.kind) {
     case RPC_TASK_MAP_RESP: {
+      rpc_task_map_resp_t map = resp.as.map;
       LOG_INFO("worker", "got MAP task=%u attempt=%u n_reduce=%u input=%s",
-               resp.as.map.task_id, resp.as.map.attempt_id,
-               resp.as.map.n_reduce, resp.as.map.input_path);
+               map.task_id, map.attempt_id, map.n_reduce, map.input_path);
       int64_t t0 = now_ms();
-      int rv = worker_map_run(resp.as.map.task_id, resp.as.map.attempt_id,
-                              resp.as.map.n_reduce, resp.as.map.input_path);
+      int rv = worker_map_run(map.task_id, map.attempt_id, map.n_reduce,
+                              map.input_path, emit_word_count);
       uint8_t result = (rv == 0) ? 0 : 1;
       LOG_INFO("worker",
                "MAP task=%u attempt=%u finished result=%u elapsed_ms=%lld",
-               resp.as.map.task_id, resp.as.map.attempt_id, result,
+               map.task_id, map.attempt_id, result,
                (long long)(now_ms() - t0));
-      if (send_task_done(fd, resp.as.map.task_id, resp.as.map.attempt_id,
-                         result) != 0) {
-        LOG_ERROR("worker", "send_task_done MAP task=%u failed",
-                  resp.as.map.task_id);
+      if (report_task_done(fd, map.task_id, map.attempt_id, result, "MAP") != 0) {
         rc = EXIT_FAILURE;
         loop = false;
-        break;
       }
-
-      uint8_t ack_buf[MSG_MAX];
-      size_t ack_buf_len;
-      if (recv_framed(fd, ack_buf, sizeof ack_buf, &ack_buf_len) != 0) {
-        LOG_ERROR("worker", "recv ACK for MAP task=%u failed",
-                  resp.as.map.task_id);
-        rc = EXIT_FAILURE;
-        loop = false;
-        break;
-      }
-
-      rpc_kind_t ack_kind;
-      if (rpc_peek_kind(ack_buf, ack_buf_len, &ack_kind) != 0) {
-        LOG_ERROR("worker", "peek_kind ACK failed for MAP task=%u",
-                  resp.as.map.task_id);
-        rc = EXIT_FAILURE;
-        loop = false;
-        break;
-      }
-      if (ack_kind != RPC_TASK_DONE_ACK) {
-        LOG_ERROR("worker",
-                  "expected RPC_TASK_DONE_ACK for MAP task=%u, got kind=%d",
-                  resp.as.map.task_id, (int)ack_kind);
-        rc = EXIT_FAILURE;
-        loop = false;
-        break;
-      }
-
       break;
     }
     case RPC_TASK_REDUCE_RESP: {
       rpc_task_reduce_resp_t reduce = resp.as.reduce;
       LOG_INFO("worker", "got REDUCE task=%u attempt=%u n_map=%u",
                reduce.task_id, reduce.attempt_id, reduce.n_map);
-      int rv =
-          worker_reduce_run(reduce.task_id, reduce.attempt_id, reduce.n_map);
+      int64_t t0 = now_ms();
+      int rv = worker_reduce_run(reduce.task_id, reduce.attempt_id,
+                                 reduce.n_map, fold_word_count);
       uint8_t result = (rv == 0) ? 0 : 1;
-      if (send_task_done(fd, resp.as.reduce.task_id, resp.as.reduce.attempt_id,
-                         result) != 0) {
-        LOG_ERROR("worker", "send_task_done REDUCE task=%u failed",
-                  resp.as.reduce.task_id);
+      LOG_INFO("worker",
+               "REDUCE task=%u attempt=%u finished result=%u elapsed_ms=%lld",
+               reduce.task_id, reduce.attempt_id, result,
+               (long long)(now_ms() - t0));
+      if (report_task_done(fd, reduce.task_id, reduce.attempt_id, result,
+                           "REDUCE") != 0) {
         rc = EXIT_FAILURE;
         loop = false;
-      }
-
-      uint8_t ack_buf[MSG_MAX];
-      size_t ack_buf_len;
-      if (recv_framed(fd, ack_buf, sizeof ack_buf, &ack_buf_len) != 0) {
-        LOG_ERROR("worker", "recv ACK for REDUCE task=%u failed",
-                  resp.as.reduce.task_id);
-        rc = EXIT_FAILURE;
-        loop = false;
-        break;
-      }
-
-      rpc_kind_t ack_kind;
-      if (rpc_peek_kind(ack_buf, ack_buf_len, &ack_kind) != 0) {
-        LOG_ERROR("worker", "peek_kind ACK failed for REDUCE task=%u",
-                  resp.as.reduce.task_id);
-        rc = EXIT_FAILURE;
-        loop = false;
-        break;
-      }
-      if (ack_kind != RPC_TASK_DONE_ACK) {
-        LOG_ERROR("worker",
-                  "expected RPC_TASK_DONE_ACK for REDUCE task=%u, got kind=%d",
-                  resp.as.reduce.task_id, (int)ack_kind);
-        rc = EXIT_FAILURE;
-        loop = false;
-        break;
       }
       break;
     }

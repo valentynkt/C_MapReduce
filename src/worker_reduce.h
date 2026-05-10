@@ -1,14 +1,22 @@
-
 #ifndef WORKER_REDUCE_H
 #define WORKER_REDUCE_H
 
+#include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
-/* Run the reduce function on the map intermediate files mr-{X}-{Y} for X [0,
- * n_map), Y task_id producing one output/mr-out-{y} where Y = task_id . 0
- * -Success, -1 on Error
- */
+typedef void (*worker_reduce_fold_fn)(const char *key,
+                                      const char **values, size_t n_values,
+                                      FILE *out);
 
-int worker_reduce_run(uint32_t task_id, uint32_t attempt_id, uint32_t n_map);
+void fold_word_count(const char *key,
+                     const char **values, size_t n_values,
+                     FILE *out);
+/* TODO(phase-6): fold_inverted_index */
+
+/* Run reduce task: read M files mr-{X}-{task_id}, group by key, fold each
+   group, atomically publish output/mr-out-{task_id}. 0 on success, -1 on error. */
+int worker_reduce_run(uint32_t task_id, uint32_t attempt_id, uint32_t n_map,
+                      worker_reduce_fold_fn fold);
 
 #endif
