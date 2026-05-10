@@ -169,8 +169,8 @@ static int choose_available_task(int fd, task_kind_e kind) {
   return choosen;
 }
 
-static int wait_for_available_tasks(int fd, uint8_t *buf, size_t *out_len,
-                                    task_kind_e kind) {
+static int wait_for_available_tasks(int fd, uint8_t *buf, size_t cap,
+                                    size_t *out_len, task_kind_e kind) {
   /* No PENDING. If maps_done < M, some are still running -> WAIT.
      If maps_done == M, TaskDone failed to advance the phase -> bug. */
   bool assert_guard =
@@ -181,7 +181,7 @@ static int wait_for_available_tasks(int fd, uint8_t *buf, size_t *out_len,
   rpc_wait_resp_t msg = (rpc_wait_resp_t){
       .wait_ms = (uint32_t)(master.job.task_timeout_ms / 2),
   };
-  if (rpc_encode_wait_resp(buf, sizeof buf, &msg, out_len) != 0)
+  if (rpc_encode_wait_resp(buf, cap, &msg, out_len) != 0)
     return -1;
   if (kind == TASK_KIND_MAP) {
     LOG_INFO("master",
@@ -219,7 +219,8 @@ static int master_handle_get_task(int fd) {
                "assigned MAP task=%d attempt=%u fd=%d input=%s n_reduce=%u",
                choosen, t->current_attempt, fd, t->input_path, master.job.R);
     } else {
-      if (wait_for_available_tasks(fd, buf, &out_len, TASK_KIND_MAP) != 0) {
+      if (wait_for_available_tasks(fd, buf, sizeof buf, &out_len,
+                                   TASK_KIND_MAP) != 0) {
         return -1;
       }
     }
@@ -243,7 +244,8 @@ static int master_handle_get_task(int fd) {
 
     } else {
 
-      if (wait_for_available_tasks(fd, buf, &out_len, TASK_KIND_REDUCE) != 0) {
+      if (wait_for_available_tasks(fd, buf, sizeof buf, &out_len,
+                                   TASK_KIND_REDUCE) != 0) {
         return -1;
       }
     }
@@ -355,16 +357,10 @@ static int task_done_helper(int fd, const rpc_task_done_req_t *msg) {
 }
 
 static int master_handle_task_done(int fd, const rpc_task_done_req_t *msg) {
-
   switch (master.job.phase) {
-  case JOB_MAP: {
-    task_done_helper(fd, msg);
-    break;
-  }
+  case JOB_MAP:
   case JOB_REDUCE:
-    task_done_helper(fd, msg);
-    break;
-    return -1;
+    return task_done_helper(fd, msg);
   case JOB_DONE:
     LOG_WARN("master", "TaskDone fd=%d phase=JOB_DONE — unexpected", fd);
     return -1;
