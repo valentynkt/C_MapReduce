@@ -124,15 +124,17 @@ static int read_records_file(const char *path, d_array_t *array) {
 }
 
 static int comp(const void *a, const void *b) {
-  char *a_key = (*(record_t *)a).key;
-  char *b_key = (*(record_t *)b).key;
-  return strcmp(a_key, b_key);
+  const record_t *ra = *(record_t *const *)a;
+  const record_t *rb = *(record_t *const *)b;
+  return strcmp(ra->key, rb->key);
 }
 
 static void fold_word_count(char *key, const char **values, size_t n_value,
                             FILE *out) {
-  for (size_t i = 0; i < n_value; i++) {
-  }
+  (void)values;
+  // fsync or any operation to force write to a file?
+  // probably it just waiting in buffer
+  fprintf(out, "%s\t%zu\n", key, n_value);
 }
 
 int worker_reduce_run(uint32_t task_id, uint32_t attempt_id, uint32_t n_map) {
@@ -140,27 +142,16 @@ int worker_reduce_run(uint32_t task_id, uint32_t attempt_id, uint32_t n_map) {
   LOG_INFO("worker.reduce", "run start task=%u attempt=%u n_map=%u  pid=%d",
            task_id, attempt_id, n_map, (int)getpid());
   assert(n_map > 0);
-  FILE *handle = {0};
+  FILE *handle = NULL;
   char input_paths[MAX_MAP_TASKS][MAPREDUCE_PATH_MAX];
   char temp_path[MAPREDUCE_PATH_MAX];
   char final_path[MAPREDUCE_PATH_MAX];
   d_array_t *array = init_array();
-  uint32_t i = 0;
-  for (; i < n_map; i++) {
-    int n = snprintf(input_paths[i], MAPREDUCE_PATH_MAX,
-                     "intermediate/mr-%u-%u", i /* X */, task_id /* Y */);
-
-    if (n < 0 || (size_t)n >= MAPREDUCE_PATH_MAX) {
-      LOG_ERROR("worker.reduce", "input path truncation for task=%u x=%u",
-                task_id, i);
-      goto cleanup;
-    }
-
-    if (read_records_file(input_paths[i], array) != 0) {
-      goto cleanup;
-    }
+  if (!array) {
+    LOG_ERROR("worker.reduce", "init_array returned null");
+    return -1;
   }
-  qsort(array->records, array->count, sizeof(record_t *), comp);
+
   // temp_path
   int temp_path_n =
       snprintf(temp_path, MAPREDUCE_PATH_MAX, "output/mr-out-%u.tmp.%d.%u",
@@ -178,6 +169,22 @@ int worker_reduce_run(uint32_t task_id, uint32_t attempt_id, uint32_t n_map) {
     LOG_ERROR("worker.reduce", "final path truncation for task=%u", task_id);
     goto cleanup;
   }
+
+  for (uint32_t i = 0; i < n_map; i++) {
+    int n = snprintf(input_paths[i], MAPREDUCE_PATH_MAX,
+                     "intermediate/mr-%u-%u", i /* X */, task_id /* Y */);
+
+    if (n < 0 || (size_t)n >= MAPREDUCE_PATH_MAX) {
+      LOG_ERROR("worker.reduce", "input path truncation for task=%u x=%u",
+                task_id, i);
+      goto cleanup;
+    }
+
+    if (read_records_file(input_paths[i], array) != 0) {
+      goto cleanup;
+    }
+  }
+  qsort(array->records, array->count, sizeof(record_t *), comp);
 
   handle = fopen(temp_path, "w");
   if (!handle) {
@@ -202,7 +209,7 @@ int worker_reduce_run(uint32_t task_id, uint32_t attempt_id, uint32_t n_map) {
     } else {
       fold_word_count(cur_key, vals, n_vals, handle);
       cur_key = record->key;
-      vals[0] = record->value;
+      vals[0] = record->key;
       n_vals = 1;
     }
   }

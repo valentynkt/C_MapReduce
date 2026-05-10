@@ -15,6 +15,7 @@
 #include "rpc.h"
 #include "util.h"
 #include "worker_map.h"
+#include "worker_reduce.h"
 
 #define MAX_TOKENS_WORD 100
 
@@ -128,11 +129,6 @@ static int send_task_done(int fd, uint32_t task_id, uint32_t attempt_id,
 
 /* ----- task runners (stubs for slice 2; real I/O lands in slice 3) ----- */
 
-static uint8_t run_reduce_task(void) {
-  LOG_INFO("worker", "run_reduce_task (stub)");
-  return 0;
-}
-
 /* ----- connection setup -----
    Returns the connected fd on success, -1 on error. */
 static int client_init(int port, const char *host) {
@@ -234,10 +230,11 @@ int main(int argc, char *argv[]) {
       break;
     }
     case RPC_TASK_REDUCE_RESP: {
+      rpc_task_reduce_resp_t reduce = resp.as.reduce;
       LOG_INFO("worker", "got REDUCE task=%u attempt=%u n_map=%u",
-               resp.as.reduce.task_id, resp.as.reduce.attempt_id,
-               resp.as.reduce.n_map);
-      int rv = run_reduce_task();
+               reduce.task_id, reduce.attempt_id, reduce.n_map);
+      int rv =
+          worker_reduce_run(reduce.task_id, reduce.attempt_id, reduce.n_map);
       uint8_t result = (rv == 0) ? 0 : 1;
       if (send_task_done(fd, resp.as.reduce.task_id, resp.as.reduce.attempt_id,
                          result) != 0) {

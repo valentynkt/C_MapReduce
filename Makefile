@@ -19,6 +19,7 @@ MASTER_SRCS = $(SRC_DIR)/master.c \
 # worker only (sequential client, no event loop)
 WORKER_SRCS = $(SRC_DIR)/worker.c \
               $(SRC_DIR)/worker_map.c \
+              $(SRC_DIR)/worker_reduce.c \
               $(COMMON_SRCS)
 
 MASTER_OBJS = $(MASTER_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
