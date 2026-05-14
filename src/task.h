@@ -20,10 +20,7 @@
 
 /* ----- Task kind ----- */
 
-typedef enum {
-  TASK_KIND_MAP,
-  TASK_KIND_REDUCE,
-} task_kind_e;
+typedef enum { TASK_KIND_MAP = 1, TASK_KIND_REDUCE = 2 } task_kind_e;
 
 /* ----- Task lifecycle state ----- */
 

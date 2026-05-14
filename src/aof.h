@@ -1,0 +1,29 @@
+#ifndef AOF_H
+#define AOF_H
+// ToDo: Circular Dependency? on master <> aof?
+#include "master.h"
+#include "rpc.h"
+
+#include "task.h"
+
+/* --- AOF FILE-LEVEL header (offset 0, written once per file) ---
+   ┌────────────┬─────────┬─────────┬───────────────┬──────────────┐
+   │ 8B magic   │ 4B ver  │ 4B flag │ 8B created_ms │ 8B header CRC│
+   └────────────┴─────────┴─────────┴───────────────┴──────────────┘
+   header CRC64 covers bytes 0..23. All multi-byte fields big-endian. */
+#define AOF_FILE_MAGIC "BYTEKVAF"
+#define AOF_FILE_MAGIC_LEN 8
+#define AOF_FILE_VERSION 1
+#define AOF_FILE_VERSION_LEN 4
+#define AOF_FILE_CRC_LEN 8
+#define AOF_FILE_HEADER_SIZE 32
+
+#define AOF_RECORD_SIZE 32
+
+int aof_load(const char *path);
+int aof_open(const char *path);
+// which params do we need to path here?
+int aof_append_completed(const master_t *master, const rpc_task_done_req_t *msg,
+                         task_kind_e kind, const char *path);
+
+#endif // !DEBUG
