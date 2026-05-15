@@ -24,6 +24,6 @@ int aof_load(const char *path);
 int aof_open(const char *path);
 // which params do we need to path here?
 int aof_append_completed(const master_t *master, const rpc_task_done_req_t *msg,
-                         task_kind_e kind, const char *path);
+                         task_kind_e kind);
 
 #endif // !DEBUG

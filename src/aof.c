@@ -225,10 +225,8 @@ int aof_load(const char *path) {
  * record (Fixed Sized vs Lengh prefixed? I prefer fixed sized for now)
  * task_kind_e, task_id, attemptId, timestamp, crc.
 */
-int aof_append_completed(const master_t *master, const rpc_task_done_req_t *msg,
-                         task_kind_e kind, const char *path) {
-  const job_t job = master->job;
-  int fd = aof_open(path);
+int aof_init(master_t *master, const char *path) {
+  int fd = master->aof_fd = aof_open(path);
   if (fd == -1) {
     LOG_ERROR("aof.aof_append_completed", "aof_open failed\n");
     return -1;
@@ -237,34 +235,59 @@ int aof_append_completed(const master_t *master, const rpc_task_done_req_t *msg,
   if (fstat(fd, &st) == -1) {
     LOG_ERROR("aof.aof_append_completed", "fstat error, fd: %d, path: %s\n", fd,
               path);
+    close(fd);
     return -1;
   }
+
+  const job_t job = master->job;
+
+  size_t job_buf_size = sizeof(job.M) + sizeof(job.R);
+  for (uint32_t i = 0; i < job.M; i++) {
+    task_t cur_t = master->maps[i];
+    job_buf_size += sizeof(cur_t.input_path_len) + cur_t.input_path_len;
+  }
+
+  uint8_t *job_buf = malloc(job_buf_size);
+  if (job_buf == NULL) {
+    LOG_ERROR("aof_append_completed", "job_buf malloc error");
+    goto failure;
+  }
+
   // File Empty we have to add file header to it
   if (st.st_size == 0) {
     if (aof_write_file_header(fd) == -1) {
-      return -1;
+      goto failure;
     }
 
-    size_t job_buf_size = sizeof(job.M) + sizeof(job.R);
-    for (uint32_t i = 0; i < job.M; i++) {
-      task_t cur_t = master->maps[i];
-      job_buf_size += sizeof(cur_t.input_path_len) + cur_t.input_path_len;
-    }
-
-    uint8_t *job_buf = malloc(job_buf_size);
     if (aof_write_job(fd, job_buf, job_buf_size, job.M, job.R, master->maps) ==
         -1) {
 
-      return -1;
+      goto failure;
     }
     free(job_buf);
   }
 
+failure:
+  free(job_buf);
+  close(fd);
+  return -1;
+}
+
+int aof_append_completed(const master_t *master, const rpc_task_done_req_t *msg,
+                         task_kind_e kind) {
+  int fd = master->aof_fd;
   uint8_t rec[AOF_RECORD_SIZE];
   if (aof_write_record(fd, rec, msg, kind) == -1) {
-    return -1;
+    goto failure;
   }
 
-  fsync(fd);
+  if (durable_flush(fd) == -1) {
+    goto failure;
+  }
   close(fd);
+  return 0;
+
+failure:
+  close(fd);
+  return -1;
 }

@@ -30,6 +30,7 @@ typedef struct {
   worker_t workers[MAX_FDS]; /* application state per fd */
 
   int64_t now_realtime_ms; /* wall clock, for persisted timestamps */
+  int aof_fd;
 } master_t;
 
 extern master_t master;
