@@ -26,6 +26,7 @@
 #define CONFIG_DEFAULT_INPUT_DIR "./input"
 #define CONFIG_DEFAULT_N_REDUCE 4
 #define CONFIG_DEFAULT_TASK_TIMEOUT_MS 10000
+#define CONFIG_DEFAULT_AOF_PATH "./mr.aof"
 
 /* Config entry types */
 typedef enum {

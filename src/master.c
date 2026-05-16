@@ -337,6 +337,9 @@ static int task_done_helper(int fd, const rpc_task_done_req_t *msg) {
                current_task_id, t->current_attempt, fd, master.job.reduces_done,
                master.job.R);
     }
+    task_kind_e kind = master.workers[fd].current_kind;
+    /* persisting completed tasks */
+    aof_append_completed(&master, msg, kind);
     maybe_advance_phase();
   } else {
     if (phase == JOB_MAP)
@@ -452,8 +455,8 @@ static void free_scandir_entries(struct dirent **entries, int n) {
     free(entries[i]);
   free(entries);
 }
-
 static int master_init_job(void) {
+
   struct dirent **entries = NULL;
   int n = scandir(master.config.input_dir, &entries, input_filter, alphasort);
   if (n < 0) {
@@ -470,7 +473,6 @@ static int master_init_job(void) {
     LOG_ERROR("master", "mkdir(output): %s", strerror(errno));
     return -1;
   }
-
   uint32_t M = 0;
   for (int i = 0; i < n; i++) {
     char path[MAPREDUCE_PATH_MAX];
@@ -548,6 +550,26 @@ static int master_init_job(void) {
   return 0;
 }
 
+static int master_bootstrap_job(void) {
+  char *aof_path = master.config.aof_path;
+  struct stat st;
+  // AOF exist and is valid
+  if (stat(aof_path, &st) == 0 && st.st_size > 0) {
+    // ToDo what to do when aof_load fail? For now lets just return error;
+    if (aof_load(&master, aof_path) != -1) {
+      LOG_ERROR("master", "aof_load error");
+      return -1;
+    }
+  } else {
+    if (master_init_job() == -1) {
+      LOG_ERROR("master", "master_init_job");
+      return -1;
+    }
+  }
+  aof_init(&master, aof_path);
+  return 0;
+}
+
 static int master_init(void) {
   master.now_realtime_ms = realtime_ms();
 
@@ -579,7 +601,8 @@ int master_main(const char *configfile) {
       return EXIT_FAILURE;
   }
 
-  if (master_init_job() != 0) {
+  // here should be aof_load;
+  if (master_bootstrap_job() != 0) {
     return EXIT_FAILURE;
   }
 

@@ -2,6 +2,7 @@
 #include "config.h"
 #include "crc64.h"
 #include "log.h"
+#include "master.h"
 #include "rpc.h"
 #include "task.h"
 #include "util.h"
@@ -208,6 +209,7 @@ static int aof_read_job(int fd, aof_job_t *out) {
 
   // job_buf has M + R + the rest, so + 8 means skip M + R and point after it
   *out = (aof_job_t){.M = m, .R = r, .buf = job_buf + 8};
+
 done:
   /* Job buf is used externally so no cleanup on success path */
   if (off == -1) {
@@ -281,7 +283,9 @@ int aof_open(const char *path) {
   return fd;
 }
 
-int aof_load(const char *path) {
+/* ToDo */
+int aof_load(master_t *master, const char *path) {
+  (void *)master;
   struct stat st;
   if (stat(path, &st) == -1 || st.st_size == 0)
     return 0;
@@ -300,17 +304,24 @@ int aof_load(const char *path) {
 
   int rc = 0;
   if (aof_read_file_header(fd) != 0) {
+
     rc = -1;
-    goto end;
+    goto done;
   }
 
-  if (aof_read_job(fd)) != 0){
-      rc = -1;
-      goto end;
-    }
+  aof_job_t aof_job;
+
+  ssize_t job_n = aof_read_job(fd, &aof_job);
+  if (job_n == -1) {
+    rc = -1;
+    goto done;
+  };
   /* TODO: read job header, walk records, populate master state */
 
-end:
+done:
+  if (aof_job.buf) {
+    free(aof_job.buf);
+  }
   close(fd);
   return rc;
 }

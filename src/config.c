@@ -17,6 +17,7 @@ static config_entry_t config_table[] = {
     {"task-timeout-ms", CONFIG_TYPE_INT, OFFSET(task_timeout_ms), 100, 600000,
      NULL},
     {"input-dir", CONFIG_TYPE_STRING, OFFSET(input_dir), 0, 0, NULL},
+    {"aof-path", CONFIG_TYPE_STRING, OFFSET(aof_path), 0, 0, NULL},
     {NULL, 0, 0, 0, 0, NULL},
 };
 
@@ -28,8 +29,10 @@ void master_config_init(void) {
   master.config.n_reduce = CONFIG_DEFAULT_N_REDUCE;
   master.config.task_timeout_ms = CONFIG_DEFAULT_TASK_TIMEOUT_MS;
 
-  /* strdup so apply_config's free() on the heap-vs-literal distinction stays consistent */
+  /* strdup so apply_config's free() on the heap-vs-literal distinction stays
+   * consistent */
   master.config.input_dir = strdup(CONFIG_DEFAULT_INPUT_DIR);
+  master.config.aof_path = strdup(CONFIG_DEFAULT_AOF_PATH);
   if (!master.config.input_dir) {
     fprintf(stderr, "out of memory initializing config\n");
     abort();

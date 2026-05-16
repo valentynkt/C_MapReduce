@@ -17,6 +17,7 @@ typedef struct {
   int n_reduce;
   int task_timeout_ms;
   char *input_dir;
+  char *aof_path;
 } master_config_t;
 
 typedef struct {
