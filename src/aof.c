@@ -94,6 +94,40 @@ static int aof_read_file_header(int fd) {
   }
   return 0;
 }
+/* ToDo: read record */
+static int aof_read_record(int fd, rpc_task_done_req_t *out,
+                           task_kind_e *kind) {
+  uint8_t rec[AOF_RECORD_SIZE];
+  ssize_t n = read_exact(fd, (char *)rec, AOF_RECORD_SIZE);
+  if (n != AOF_RECORD_SIZE) {
+    LOG_ERROR("aof_read_job", "header read short (%zd of %d)", n,
+              AOF_RECORD_SIZE);
+    return -1;
+  }
+  size_t off = 0;
+  *kind = rec[off];
+  off += 1;
+  uint32_t task_id_net;
+  memcpy(&task_id_net, rec + off, 4);
+  off += 4;
+  out->task_id = ntohl(task_id_net);
+
+  uint32_t attempt_id_net;
+  memcpy(&attempt_id_net, rec + off, 4);
+  off += 4;
+  out->attempt_id = ntohl(attempt_id_net);
+  uint64_t crc_stored_net;
+  memcpy(&crc_stored_net, rec + off, 8);
+  off += 8;
+  uint64_t crc_stored = ntohl(crc_stored_net);
+  uint64_t crc_computed = crc64(0, rec, off - 8);
+  if (crc_stored != crc_computed) {
+    LOG_ERROR("aof_read_record", "CRC record mismatch");
+    return -1;
+  }
+
+  return 0;
+}
 
 /* ----- record ----- */
 /* layout: 1B kind | 4B task_id | 4B attempt_id | 8B crc64 */
@@ -131,7 +165,7 @@ static ssize_t aof_write_record(int fd, uint8_t *buf,
 // path itself);
 // returs off (aof_job_t out buf) off = size of buf
 //
-static int aof_read_job(int fd, aof_job_t *out) {
+static ssize_t aof_read_job(int fd, aof_job_t *out) {
   ssize_t off = 0;
   // M 4b, R 4b
   ssize_t job_static_hdr = 8;
@@ -285,7 +319,6 @@ int aof_open(const char *path) {
 
 /* ToDo */
 int aof_load(master_t *master, const char *path) {
-  (void *)master;
   struct stat st;
   if (stat(path, &st) == -1 || st.st_size == 0)
     return 0;
