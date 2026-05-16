@@ -167,6 +167,19 @@ static ssize_t aof_write_job(int fd, uint8_t *buf, size_t buf_sz, uint32_t M,
   return (ssize_t)off;
 }
 
+int aof_close(master_t *m) {
+  int fd = m->aof_fd;
+  if (durable_flush(fd) == -1) {
+    return -1;
+  }
+  if (close(fd) == -1) {
+    return -1;
+  }
+  m->aof_fd = -1;
+
+  return 0;
+}
+
 int aof_open(const char *path) {
   if (path == NULL) {
     LOG_ERROR("aof.aof_open", "path is NULL\n");
@@ -200,6 +213,9 @@ int aof_load(const char *path) {
   off_t total_size = st.st_size;
   off_t valid_end = 0;
   size_t records = 0;
+  /* TO BE IMPLEMENTED */
+
+  return 0;
 }
 /* We have to design the record that we will serialize
  * we def need to save some part of task_t so we could replay the completed
@@ -231,12 +247,16 @@ int aof_init(master_t *master, const char *path) {
     LOG_ERROR("aof.aof_append_completed", "aof_open failed\n");
     return -1;
   }
+  int rc = 0;
+  uint8_t *job_buf = NULL;
   struct stat st;
   if (fstat(fd, &st) == -1) {
     LOG_ERROR("aof.aof_append_completed", "fstat error, fd: %d, path: %s\n", fd,
               path);
+    master->aof_fd = -1;
     close(fd);
-    return -1;
+    rc = -1;
+    goto end;
   }
 
   const job_t job = master->job;
@@ -247,30 +267,33 @@ int aof_init(master_t *master, const char *path) {
     job_buf_size += sizeof(cur_t.input_path_len) + cur_t.input_path_len;
   }
 
-  uint8_t *job_buf = malloc(job_buf_size);
+  job_buf = malloc(job_buf_size);
   if (job_buf == NULL) {
     LOG_ERROR("aof_append_completed", "job_buf malloc error");
-    goto failure;
+    rc = -1;
+    goto end;
   }
 
   // File Empty we have to add file header to it
   if (st.st_size == 0) {
     if (aof_write_file_header(fd) == -1) {
-      goto failure;
+      rc = -1;
+      goto end;
     }
 
     if (aof_write_job(fd, job_buf, job_buf_size, job.M, job.R, master->maps) ==
         -1) {
 
-      goto failure;
+      rc = -1;
+      goto end;
     }
-    free(job_buf);
   }
 
-failure:
-  free(job_buf);
-  close(fd);
-  return -1;
+end:
+  if (job_buf) {
+    free(job_buf);
+  }
+  return rc;
 }
 
 int aof_append_completed(const master_t *master, const rpc_task_done_req_t *msg,
