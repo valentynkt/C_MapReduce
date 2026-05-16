@@ -14,6 +14,8 @@ MASTER_SRCS = $(SRC_DIR)/master.c \
               $(SRC_DIR)/server.c \
               $(SRC_DIR)/event_loop.c \
               $(SRC_DIR)/config.c \
+              $(SRC_DIR)/aof.c \
+              $(SRC_DIR)/crc64.c \
               $(COMMON_SRCS)
 
 # worker only (sequential client, no event loop)

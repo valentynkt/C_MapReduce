@@ -5,27 +5,27 @@
 #include "rpc.h"
 #include "task.h"
 #include "util.h"
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
+
 #if defined(__linux__)
 #include <endian.h>
 #elif defined(__APPLE__)
 #include <sys/endian.h>
 #endif
-#include "master.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
-/* ToDo */
-/* File-level header */
+/* ----- file-level header ----- */
+/* layout: 8B magic | 4B version | 4B flags | 8B created_ms | 8B crc64 */
+
 int aof_write_file_header(int fd) {
   size_t off = 0;
   uint8_t hdr[AOF_FILE_HEADER_SIZE];
@@ -50,39 +50,34 @@ int aof_write_file_header(int fd) {
 
   ssize_t written_n = write_all(fd, (const char *)hdr, AOF_FILE_HEADER_SIZE);
   if (written_n != AOF_FILE_HEADER_SIZE) {
-    LOG_ERROR("aof_write_file_header",
-              "write_all didn't wrote all data: wrote: %zu from: %d\n",
+    LOG_ERROR("aof_write_file_header", "write_all short: wrote %zd of %d",
               written_n, AOF_FILE_HEADER_SIZE);
     return -1;
   }
   return 0;
 }
 
-/* Read+validate the 32-byte file header from `fd`'s current offset.
-   On success the fd is positioned at the first record (offset = HEADER_SIZE).
-   Returns 0 on success, -1 on bad magic / unknown version / corrupt CRC. */
+/* Read+validate the file header from `fd`'s current offset.
+   On success the fd is positioned at the first byte after the header. */
 static int aof_read_file_header(int fd) {
   uint8_t hdr[AOF_FILE_HEADER_SIZE];
   ssize_t n = read_exact(fd, (char *)hdr, AOF_FILE_HEADER_SIZE);
 
   if (n != AOF_FILE_HEADER_SIZE) {
-    LOG_ERROR("aof.aof_read_file_header",
-              "header read short (%zd of %d) - file too small\n", n,
+    LOG_ERROR("aof_read_file_header", "header read short (%zd of %d)", n,
               AOF_FILE_HEADER_SIZE);
     return -1;
   }
   if (memcmp(hdr, AOF_FILE_MAGIC, AOF_FILE_MAGIC_LEN) != 0) {
-    LOG_ERROR("aof.aof_read_file_header",
-              "Bad magic. This file is not version or Legacy/Corrupt. \n "
-              "Delete it and restart to begin fresh. \n");
+    LOG_ERROR("aof_read_file_header", "bad magic — not an AOF file or corrupt");
     return -1;
   }
   uint32_t version_net;
   memcpy(&version_net, hdr + AOF_FILE_MAGIC_LEN, AOF_FILE_VERSION_LEN);
   uint32_t version = ntohl(version_net);
   if (version != AOF_FILE_VERSION) {
-    LOG_ERROR("aof.aof_read_file_header",
-              "Unsupported file version %u (this build expects %u)\n", version,
+    LOG_ERROR("aof_read_file_header",
+              "unsupported version %u (build expects %u)", version,
               AOF_FILE_VERSION);
     return -1;
   }
@@ -93,20 +88,22 @@ static int aof_read_file_header(int fd) {
   uint64_t crc_computed =
       crc64(0, hdr, (AOF_FILE_HEADER_SIZE - AOF_FILE_CRC_LEN));
   if (crc_stored != crc_computed) {
-    LOG_ERROR("aof.aof_read_file_header", "header CRC mismatch \n");
+    LOG_ERROR("aof_read_file_header", "header CRC mismatch");
     return -1;
   }
   return 0;
 }
-/* kind (1), task_id 4, attemptId 4, crc 8 */
-/* ToDo: Align to 32? */
+
+/* ----- record ----- */
+/* layout: 1B kind | 4B task_id | 4B attempt_id | 8B crc64 */
 
 static ssize_t aof_write_record(int fd, uint8_t *buf,
                                 const rpc_task_done_req_t *msg,
                                 task_kind_e kind) {
   size_t off = 0;
-  buf[off] = kind;
+  buf[off] = (uint8_t)kind;
   off += 1;
+
   uint32_t task_id_net = htonl(msg->task_id);
   memcpy(buf + off, &task_id_net, 4);
   off += 4;
@@ -114,6 +111,7 @@ static ssize_t aof_write_record(int fd, uint8_t *buf,
   uint32_t attempt_id_net = htonl(msg->attempt_id);
   memcpy(buf + off, &attempt_id_net, 4);
   off += 4;
+
   uint64_t crc = crc64(0, buf, off);
   uint64_t crc_net = htobe64(crc);
   memcpy(buf + off, &crc_net, 8);
@@ -123,10 +121,12 @@ static ssize_t aof_write_record(int fd, uint8_t *buf,
   if (written_n == -1 || written_n != (ssize_t)off) {
     return -1;
   }
-
-  return off;
+  return (ssize_t)off;
 }
-// Input_pathes = M * (input_path_len, input path)
+
+/* ----- job header ----- */
+/* layout: 4B M | 4B R | M times: 2B path_len | path_len bytes of path */
+
 static ssize_t aof_write_job(int fd, uint8_t *buf, size_t buf_sz, uint32_t M,
                              uint32_t R, const task_t *maps) {
   size_t off = 0;
@@ -135,7 +135,7 @@ static ssize_t aof_write_job(int fd, uint8_t *buf, size_t buf_sz, uint32_t M,
   uint32_t R_net = htonl(R);
 
   if (off + sizeof(M_net) + sizeof(R_net) > buf_sz) {
-    LOG_ERROR("aof_serialize_job", "buf_sz is too small: %zu\n", buf_sz);
+    LOG_ERROR("aof_write_job", "buf_sz too small: %zu", buf_sz);
     return -1;
   }
   memcpy(buf + off, &M_net, sizeof(M_net));
@@ -149,14 +149,13 @@ static ssize_t aof_write_job(int fd, uint8_t *buf, size_t buf_sz, uint32_t M,
     uint16_t path_len_net = htons(path_len);
 
     if (off + sizeof(path_len_net) + path_len > buf_sz) {
-      LOG_ERROR("aof_serialize_job", "buf_sz is too small: %zu\n", buf_sz);
+      LOG_ERROR("aof_write_job", "buf_sz too small: %zu", buf_sz);
       return -1;
     }
 
     memcpy(buf + off, &path_len_net, sizeof(path_len_net));
     off += sizeof(path_len_net);
     memcpy(buf + off, maps[i].input_path, path_len);
-
     off += path_len;
   }
 
@@ -167,28 +166,17 @@ static ssize_t aof_write_job(int fd, uint8_t *buf, size_t buf_sz, uint32_t M,
   return (ssize_t)off;
 }
 
-int aof_close(master_t *m) {
-  int fd = m->aof_fd;
-  if (durable_flush(fd) == -1) {
-    return -1;
-  }
-  if (close(fd) == -1) {
-    return -1;
-  }
-  m->aof_fd = -1;
-
-  return 0;
-}
+/* ----- open / load / close ----- */
 
 int aof_open(const char *path) {
   if (path == NULL) {
-    LOG_ERROR("aof.aof_open", "path is NULL\n");
+    LOG_ERROR("aof_open", "path is NULL");
     return -1;
   }
 
   int fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644);
   if (fd == -1) {
-    LOG_ERROR("aof.aof_open", "open fd: %d failedr. \n", fd);
+    LOG_ERROR("aof_open", "open(%s): %s", path, strerror(errno));
     return -1;
   }
   return fd;
@@ -200,98 +188,102 @@ int aof_load(const char *path) {
     return 0;
 
   if (st.st_size < AOF_FILE_HEADER_SIZE) {
-    LOG_ERROR("aof.load",
-              "aof: file too small for v1 header (%lld bytes < %d)\n",
+    LOG_ERROR("aof_load", "file too small for v1 header (%lld bytes < %d)",
               (long long)st.st_size, AOF_FILE_HEADER_SIZE);
-  }
-
-  int fd = open(path, O_RDWR);
-  if (fd == -1) {
-    LOG_ERROR("aof.load", "open fd: %d\n", fd);
     return -1;
   }
-  off_t total_size = st.st_size;
-  off_t valid_end = 0;
-  size_t records = 0;
-  /* TO BE IMPLEMENTED */
 
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd == -1) {
+    LOG_ERROR("aof_load", "open(%s): %s", path, strerror(errno));
+    return -1;
+  }
+
+  int rc = 0;
+  if (aof_read_file_header(fd) != 0) {
+    rc = -1;
+    goto end;
+  }
+
+  /* TODO: read job header, walk records, populate master state */
+
+end:
+  close(fd);
+  return rc;
+}
+
+int aof_close(master_t *master) {
+  if (master->aof_fd < 0)
+    return 0;
+  int fd = master->aof_fd;
+  master->aof_fd = -1;
+  if (close(fd) != 0) {
+    LOG_ERROR("aof_close", "close fd=%d: %s", fd, strerror(errno));
+    return -1;
+  }
   return 0;
 }
-/* We have to design the record that we will serialize
- * we def need to save some part of task_t so we could replay the completed
- tasks.
- * and than we could move the phase based on the number of completed tasks
- etc..
- * BUT do we need to have a seperate file for each job, maybe adding the auto
- generated id, for each job, so we could save state of the job itself
- * especially the M - R configuration of it, so during replay, we could now,
- to what M - R are we targetting etc..
- * so it could be a seperate file with filename mr-{job-id}.aof (it will be
- byte storage)
- * having in the beginning the file header with version, checksum etc.. for
- validation.
- * than the "job header" with the number of M and R and some other files, and
- than individual records of tasks after it?
- * LAYOUT:
- * FILE HEADER (MAGIC, VERSION, FLAGS, CRC etc...)
- * JOB: M, R, Input Pathes? (Variable Lenght, M * MAPREDUCE_PATH_MAX);
- *
-  char input_path[MAPREDUCE_PATH_MAX];
-  uint16_t input_path_len;
- * record (Fixed Sized vs Lengh prefixed? I prefer fixed sized for now)
- * task_kind_e, task_id, attemptId, timestamp, crc.
-*/
+
+/* ----- public entry points ----- */
+
 int aof_init(master_t *master, const char *path) {
-  int fd = master->aof_fd = aof_open(path);
+  int fd = aof_open(path);
   if (fd == -1) {
-    LOG_ERROR("aof.aof_append_completed", "aof_open failed\n");
+    LOG_ERROR("aof_init", "aof_open(%s) failed", path);
+    master->aof_fd = -1;
     return -1;
   }
+  master->aof_fd = fd;
+
   int rc = 0;
   uint8_t *job_buf = NULL;
+
   struct stat st;
   if (fstat(fd, &st) == -1) {
-    LOG_ERROR("aof.aof_append_completed", "fstat error, fd: %d, path: %s\n", fd,
-              path);
-    master->aof_fd = -1;
-    close(fd);
+    LOG_ERROR("aof_init", "fstat fd=%d path=%s: %s", fd, path, strerror(errno));
     rc = -1;
     goto end;
   }
 
-  const job_t job = master->job;
-
-  size_t job_buf_size = sizeof(job.M) + sizeof(job.R);
-  for (uint32_t i = 0; i < job.M; i++) {
-    task_t cur_t = master->maps[i];
-    job_buf_size += sizeof(cur_t.input_path_len) + cur_t.input_path_len;
-  }
-
-  job_buf = malloc(job_buf_size);
-  if (job_buf == NULL) {
-    LOG_ERROR("aof_append_completed", "job_buf malloc error");
-    rc = -1;
-    goto end;
-  }
-
-  // File Empty we have to add file header to it
+  /* First-time init: write file header + job header. On subsequent inits the
+     file already exists and we keep its contents (replay via aof_load). */
   if (st.st_size == 0) {
     if (aof_write_file_header(fd) == -1) {
       rc = -1;
       goto end;
     }
 
-    if (aof_write_job(fd, job_buf, job_buf_size, job.M, job.R, master->maps) ==
-        -1) {
+    size_t job_buf_size = sizeof(master->job.M) + sizeof(master->job.R);
+    for (uint32_t i = 0; i < master->job.M; i++) {
+      job_buf_size += sizeof(master->maps[i].input_path_len) +
+                      master->maps[i].input_path_len;
+    }
 
+    job_buf = malloc(job_buf_size);
+    if (job_buf == NULL) {
+      LOG_ERROR("aof_init", "malloc(%zu) failed", job_buf_size);
+      rc = -1;
+      goto end;
+    }
+
+    if (aof_write_job(fd, job_buf, job_buf_size, master->job.M, master->job.R,
+                      master->maps) == -1) {
+      rc = -1;
+      goto end;
+    }
+
+    if (durable_flush(fd) == -1) {
+      LOG_ERROR("aof_init", "durable_flush after init writes failed");
       rc = -1;
       goto end;
     }
   }
 
 end:
-  if (job_buf) {
-    free(job_buf);
+  free(job_buf);
+  if (rc != 0) {
+    close(fd);
+    master->aof_fd = -1;
   }
   return rc;
 }
@@ -299,18 +291,16 @@ end:
 int aof_append_completed(const master_t *master, const rpc_task_done_req_t *msg,
                          task_kind_e kind) {
   int fd = master->aof_fd;
+  if (fd < 0) {
+    LOG_ERROR("aof_append_completed", "aof_fd is not open");
+    return -1;
+  }
   uint8_t rec[AOF_RECORD_SIZE];
   if (aof_write_record(fd, rec, msg, kind) == -1) {
-    goto failure;
+    return -1;
   }
-
   if (durable_flush(fd) == -1) {
-    goto failure;
+    return -1;
   }
-  close(fd);
   return 0;
-
-failure:
-  close(fd);
-  return -1;
 }

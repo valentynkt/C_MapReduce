@@ -1,4 +1,5 @@
 #include "master.h"
+#include "aof.h"
 #include "config.h"
 #include "log.h"
 #include "rpc.h"
@@ -565,7 +566,10 @@ static int master_init(void) {
   return EXIT_SUCCESS;
 }
 
-static void master_shutdown(void) { server_shutdown(&master.server); }
+static void master_shutdown(void) {
+  aof_close(&master);
+  server_shutdown(&master.server);
+}
 
 int master_main(const char *configfile) {
   master_config_init();
