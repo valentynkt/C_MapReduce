@@ -48,6 +48,11 @@ typedef struct {
       server_send(&master.server, fd, (const char *)buf, (uint32_t)n);
   }
 */
+typedef struct {
+  uint32_t M;   /* number of map tasks; <= MAX_MAP_TASKS */
+  uint32_t R;   /* number of reduce tasks; <= MAX_REDUCE_TASKS */
+  uint8_t *buf; /* M * (input_path_len + input_path) */
+} aof_job_t;
 
 int rpc_encode_get_task_req(uint8_t *buf, size_t cap, size_t *out_len);
 

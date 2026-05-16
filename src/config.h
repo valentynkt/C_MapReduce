@@ -15,6 +15,7 @@
 
 /* Max byte length of an input split path. Used by both the wire format
    (rpc.h) and the master's task table (task.h). */
+// ToDo isn't it too much?
 #define MAPREDUCE_PATH_MAX 1024
 
 /* Default values for runtime config */

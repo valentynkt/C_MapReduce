@@ -124,6 +124,101 @@ static ssize_t aof_write_record(int fd, uint8_t *buf,
   return (ssize_t)off;
 }
 
+// What we return? read is probably not enough, we have to return the extracted
+// data like M/R * input_path + input_path_len;
+// I have to return the m r + pointer to malloc buf (which will have the len +
+// path itself);
+// returs off (aof_job_t out buf) off = size of buf
+//
+static int aof_read_job(int fd, aof_job_t *out) {
+  ssize_t off = 0;
+  // M 4b, R 4b
+  ssize_t job_static_hdr = 8;
+
+  uint8_t job_hdr[job_static_hdr];
+  ssize_t n = read_exact(fd, (char *)job_hdr, job_static_hdr);
+
+  if (n != job_static_hdr) {
+    LOG_ERROR("aof_read_job", "header read short (%zd of %zd)", n,
+              job_static_hdr);
+    off = -1;
+    goto done;
+  }
+  uint32_t m_net;
+  memcpy(&m_net, job_hdr, sizeof(m_net));
+  uint32_t m = ntohl(m_net);
+
+  uint32_t r_net;
+  memcpy(&r_net, job_hdr + sizeof(m_net), sizeof(r_net));
+  uint32_t r = ntohl(r_net);
+
+  size_t job_buf_size =
+      sizeof(m_net) + sizeof(r_net) + (m * (2 + MAPREDUCE_PATH_MAX)) + 8;
+
+  uint8_t *job_buf = malloc(job_buf_size);
+  memcpy(job_buf, job_hdr, 8);
+  off += 8;
+
+  if (job_buf == NULL) {
+    LOG_ERROR("aof_init", "malloc(%zu) failed", job_buf_size);
+    off = -1;
+    goto done;
+  }
+  for (uint32_t i = 0; i < m; i++) {
+    ssize_t path_len_n = read_exact(fd, (char *)job_buf + off, 2);
+    if (path_len_n != 2) {
+      LOG_ERROR("aof_read_job", "path_len_n header read short (%zd of %d)",
+                path_len_n, 2);
+      off = -1;
+      goto done;
+    }
+
+    off += path_len_n;
+    uint16_t path_len_net;
+    // getting the last path_len from buf;
+    memcpy(&path_len_net, job_buf + off - 2, 2);
+    uint16_t path_len = ntohs(path_len_n);
+    ssize_t path_n = read_exact(fd, (char *)job_buf + off, path_len);
+    if (path_n != path_len) {
+
+      LOG_ERROR("aof_read_job", "path_n header read short (%zd of %d)", path_n,
+                path_len);
+      off = -1;
+      goto done;
+    }
+    off += path_n;
+  }
+  uint64_t crc_stored_net;
+  ssize_t crc_n = read_exact(fd, (char *)job_buf + off, 8);
+  off += 8;
+  if (crc_n != 8) {
+    LOG_ERROR("aof_read_job", "crc_n header read short (%zd of %d)", crc_n, 8);
+    off = -1;
+    goto done;
+  }
+
+  memcpy(&crc_stored_net, job_buf + off - 8, 8);
+  uint64_t crc_stored = be64toh(crc_stored_net);
+  uint64_t crc_computed = crc64(0, job_buf, off - 8);
+  if (crc_stored != crc_computed) {
+    LOG_ERROR("aof_read_job", "job CRC mismatch");
+    off = -1;
+    goto done;
+  }
+
+  // job_buf has M + R + the rest, so + 8 means skip M + R and point after it
+  *out = (aof_job_t){.M = m, .R = r, .buf = job_buf + 8};
+done:
+  /* Job buf is used externally so no cleanup on success path */
+  if (off == -1) {
+
+    if (job_buf) {
+      free(job_buf);
+    }
+  }
+  return off;
+}
+
 /* ----- job header ----- */
 /* layout: 4B M | 4B R | M times: 2B path_len | path_len bytes of path */
 
@@ -158,6 +253,10 @@ static ssize_t aof_write_job(int fd, uint8_t *buf, size_t buf_sz, uint32_t M,
     memcpy(buf + off, maps[i].input_path, path_len);
     off += path_len;
   }
+
+  uint64_t crc = crc64(0, buf, off);
+  uint64_t crc_net = htobe64(crc);
+  memcpy(buf + off, &crc_net, sizeof(crc_net));
 
   ssize_t written_n = write_all(fd, (const char *)buf, off);
   if (written_n == -1 || written_n != (ssize_t)off) {
@@ -205,6 +304,10 @@ int aof_load(const char *path) {
     goto end;
   }
 
+  if (aof_read_job(fd)) != 0){
+      rc = -1;
+      goto end;
+    }
   /* TODO: read job header, walk records, populate master state */
 
 end:
