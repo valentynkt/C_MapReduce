@@ -18,7 +18,19 @@
 #define AOF_FILE_CRC_LEN 8
 #define AOF_FILE_HEADER_SIZE 32
 
-#define AOF_RECORD_SIZE 32
+/* --- AOF RECORD layout (per completed task) ---
+   ┌─────────┬─────────────┬────────────────┬──────────┐
+   │ 1B kind │ 4B task_id  │ 4B attempt_id  │ 8B crc64 │
+   └─────────┴─────────────┴────────────────┴──────────┘
+   record CRC64 covers bytes [0 .. SIZE - CRC_LEN).
+   All multi-byte fields big-endian. */
+#define AOF_RECORD_KIND_LEN 1
+#define AOF_RECORD_TASK_ID_LEN 4
+#define AOF_RECORD_ATTEMPT_ID_LEN 4
+#define AOF_RECORD_CRC_LEN 8
+#define AOF_RECORD_SIZE                                                        \
+  (AOF_RECORD_KIND_LEN + AOF_RECORD_TASK_ID_LEN + AOF_RECORD_ATTEMPT_ID_LEN +  \
+   AOF_RECORD_CRC_LEN)
 
 int aof_init(master_t *master, const char *path);
 int aof_load(master_t *master, const char *path);

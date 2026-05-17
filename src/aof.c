@@ -111,21 +111,21 @@ static int aof_read_record(int fd, rpc_task_done_req_t *out,
   }
   size_t off = 0;
   *kind = rec[off];
-  off += 1;
+  off += AOF_RECORD_KIND_LEN;
   uint32_t task_id_net;
-  memcpy(&task_id_net, rec + off, 4);
-  off += 4;
+  memcpy(&task_id_net, rec + off, AOF_RECORD_TASK_ID_LEN);
+  off += AOF_RECORD_TASK_ID_LEN;
   out->task_id = ntohl(task_id_net);
 
   uint32_t attempt_id_net;
-  memcpy(&attempt_id_net, rec + off, 4);
-  off += 4;
+  memcpy(&attempt_id_net, rec + off, AOF_RECORD_ATTEMPT_ID_LEN);
+  off += AOF_RECORD_ATTEMPT_ID_LEN;
   out->attempt_id = ntohl(attempt_id_net);
   uint64_t crc_stored_net;
-  memcpy(&crc_stored_net, rec + off, 8);
-  off += 8;
+  memcpy(&crc_stored_net, rec + off, AOF_RECORD_CRC_LEN);
+  off += AOF_RECORD_CRC_LEN;
   uint64_t crc_stored = be64toh(crc_stored_net);
-  uint64_t crc_computed = crc64(0, rec, off - 8);
+  uint64_t crc_computed = crc64(0, rec, off - AOF_RECORD_CRC_LEN);
   if (crc_stored != crc_computed) {
     LOG_ERROR("aof_read_record", "CRC record mismatch");
     return -1;
@@ -142,20 +142,20 @@ static ssize_t aof_write_record(int fd, uint8_t *buf,
                                 task_kind_e kind) {
   size_t off = 0;
   buf[off] = (uint8_t)kind;
-  off += 1;
+  off += AOF_RECORD_KIND_LEN;
 
   uint32_t task_id_net = htonl(msg->task_id);
-  memcpy(buf + off, &task_id_net, 4);
-  off += 4;
+  memcpy(buf + off, &task_id_net, AOF_RECORD_TASK_ID_LEN);
+  off += AOF_RECORD_TASK_ID_LEN;
 
   uint32_t attempt_id_net = htonl(msg->attempt_id);
-  memcpy(buf + off, &attempt_id_net, 4);
-  off += 4;
+  memcpy(buf + off, &attempt_id_net, AOF_RECORD_ATTEMPT_ID_LEN);
+  off += AOF_RECORD_ATTEMPT_ID_LEN;
 
   uint64_t crc = crc64(0, buf, off);
   uint64_t crc_net = htobe64(crc);
-  memcpy(buf + off, &crc_net, 8);
-  off += 8;
+  memcpy(buf + off, &crc_net, AOF_RECORD_CRC_LEN);
+  off += AOF_RECORD_CRC_LEN;
 
   ssize_t written_n = write_all(fd, (const char *)buf, off);
   if (written_n == -1 || written_n != (ssize_t)off) {
@@ -302,6 +302,7 @@ static ssize_t aof_write_job(int fd, uint8_t *buf, size_t buf_sz, uint32_t M,
   uint64_t crc = crc64(0, buf, off);
   uint64_t crc_net = htobe64(crc);
   memcpy(buf + off, &crc_net, sizeof(crc_net));
+  off += 8;
 
   ssize_t written_n = write_all(fd, (const char *)buf, off);
   if (written_n == -1 || written_n != (ssize_t)off) {
@@ -498,7 +499,7 @@ int aof_init(master_t *master, const char *path) {
       goto end;
     }
 
-    size_t job_buf_size = sizeof(master->job.M) + sizeof(master->job.R);
+    size_t job_buf_size = sizeof(master->job.M) + sizeof(master->job.R) + 8;
     for (uint32_t i = 0; i < master->job.M; i++) {
       job_buf_size += sizeof(master->maps[i].input_path_len) +
                       master->maps[i].input_path_len;
