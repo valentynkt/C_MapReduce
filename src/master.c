@@ -465,14 +465,6 @@ static int master_init_job(void) {
     return -1;
   }
 
-  if (mkdir("intermediate", 0755) != 0 && errno != EEXIST) {
-    LOG_ERROR("master", "mkdir(intermediate): %s", strerror(errno));
-    return -1;
-  }
-  if (mkdir("output", 0755) != 0 && errno != EEXIST) {
-    LOG_ERROR("master", "mkdir(output): %s", strerror(errno));
-    return -1;
-  }
   uint32_t M = 0;
   for (int i = 0; i < n; i++) {
     char path[MAPREDUCE_PATH_MAX];
@@ -554,8 +546,17 @@ static int master_bootstrap_job(void) {
   char *aof_path = master.config.aof_path;
   struct stat st;
   // AOF exist and is valid
+  if (mkdir("intermediate", 0755) != 0 && errno != EEXIST) {
+    LOG_ERROR("aof_init_job", "mkdir(intermediate): %s", strerror(errno));
+    return -1;
+  }
+  if (mkdir("output", 0755) != 0 && errno != EEXIST) {
+    LOG_ERROR("aof_init_job", "mkdir(output): %s", strerror(errno));
+    return -1;
+  }
+
   if (stat(aof_path, &st) == 0 && st.st_size > 0) {
-    // ToDo what to do when aof_load fail? For now lets just return error;
+    // TODO: what to do when aof_load fail? For now lets just return error;
     if (aof_load(&master, aof_path) != -1) {
       LOG_ERROR("master", "aof_load error");
       return -1;

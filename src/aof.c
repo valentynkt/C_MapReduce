@@ -94,7 +94,7 @@ static int aof_read_file_header(int fd) {
   }
   return 0;
 }
-/* ToDo: read record */
+/* TODO: read record */
 static int aof_read_record(int fd, rpc_task_done_req_t *out,
                            task_kind_e *kind) {
   uint8_t rec[AOF_RECORD_SIZE];
@@ -119,7 +119,7 @@ static int aof_read_record(int fd, rpc_task_done_req_t *out,
   uint64_t crc_stored_net;
   memcpy(&crc_stored_net, rec + off, 8);
   off += 8;
-  uint64_t crc_stored = ntohl(crc_stored_net);
+  uint64_t crc_stored = be64toh(crc_stored_net);
   uint64_t crc_computed = crc64(0, rec, off - 8);
   if (crc_stored != crc_computed) {
     LOG_ERROR("aof_read_record", "CRC record mismatch");
@@ -191,11 +191,16 @@ static ssize_t aof_read_job(int fd, aof_job_t *out) {
       sizeof(m_net) + sizeof(r_net) + (m * (2 + MAPREDUCE_PATH_MAX)) + 8;
 
   uint8_t *job_buf = malloc(job_buf_size);
+  if (job_buf == NULL) {
+    LOG_ERROR("aof_read_job", "job_buf malloc returned NULL");
+    off = -1;
+    goto done;
+  }
   memcpy(job_buf, job_hdr, 8);
   off += 8;
 
   if (job_buf == NULL) {
-    LOG_ERROR("aof_init", "malloc(%zu) failed", job_buf_size);
+    LOG_ERROR("aof_read_job", "malloc(%zu) failed", job_buf_size);
     off = -1;
     goto done;
   }
@@ -212,7 +217,7 @@ static ssize_t aof_read_job(int fd, aof_job_t *out) {
     uint16_t path_len_net;
     // getting the last path_len from buf;
     memcpy(&path_len_net, job_buf + off - 2, 2);
-    uint16_t path_len = ntohs(path_len_n);
+    uint16_t path_len = ntohs(path_len_net);
     ssize_t path_n = read_exact(fd, (char *)job_buf + off, path_len);
     if (path_n != path_len) {
 
@@ -241,8 +246,7 @@ static ssize_t aof_read_job(int fd, aof_job_t *out) {
     goto done;
   }
 
-  // job_buf has M + R + the rest, so + 8 means skip M + R and point after it
-  *out = (aof_job_t){.M = m, .R = r, .buf = job_buf + 8};
+  *out = (aof_job_t){.M = m, .R = r, .buf = job_buf};
 
 done:
   /* Job buf is used externally so no cleanup on success path */
@@ -316,8 +320,7 @@ int aof_open(const char *path) {
   }
   return fd;
 }
-
-/* ToDo */
+/* TODO: */
 int aof_load(master_t *master, const char *path) {
   struct stat st;
   if (stat(path, &st) == -1 || st.st_size == 0)
@@ -342,13 +345,30 @@ int aof_load(master_t *master, const char *path) {
     goto done;
   }
 
-  aof_job_t aof_job;
+  aof_job_t aof_job = {0};
 
   ssize_t job_n = aof_read_job(fd, &aof_job);
   if (job_n == -1) {
     rc = -1;
     goto done;
   };
+  for (uint32_t i = 0; i < aof_job.M; i++) {
+    rpc_task_done_req_t task_done;
+    task_kind_e kind;
+    if (aof_read_record(fd, &task_done, &kind) == -1) {
+      rc = -1;
+      goto done;
+    }
+    if (kind == TASK_KIND_MAP) {
+      master->maps[i] = (task_t) {
+        .state = TASK_COMPLETED, .owner_fd = -1,
+        .current_attempt = task_done.attempt_id,
+      }
+
+    } else if (kind == TASK_KIND_REDUCE) {
+    }
+    /* TODO: something */
+  }
   /* TODO: read job header, walk records, populate master state */
 
 done:

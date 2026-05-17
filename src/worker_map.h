@@ -6,15 +6,15 @@
 
 /* Borrowed for the emit call only. */
 typedef struct {
-  FILE       **handles;   /* R open temp files, indexed by partition Y */
-  uint32_t     R;
-  const char  *doc_name;
+  FILE **handles; /* R open temp files, indexed by partition Y */
+  uint32_t R;
+  const char *doc_name;
 } worker_map_emit_ctx_t;
 
 typedef void (*worker_map_emit_fn)(const char *token, void *ud);
 
 void emit_word_count(const char *token, void *ud);
-/* TODO(phase-6): emit_inverted_index */
+/* TODO:(phase-6): emit_inverted_index */
 
 /* Run map task: read input_path, tokenize, partition by hash, atomically
    publish R files mr-{task_id}-{Y}. 0 on success, -1 on error. */

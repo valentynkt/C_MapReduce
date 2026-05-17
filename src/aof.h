@@ -1,6 +1,6 @@
 #ifndef AOF_H
 #define AOF_H
-// ToDo: Circular Dependency? on master <> aof?
+// TODO: Circular Dependency? on master <> aof?
 #include "master.h"
 #include "rpc.h"
 
