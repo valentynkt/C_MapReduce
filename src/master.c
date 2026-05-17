@@ -124,19 +124,6 @@ static void sweep_timeouts(task_t *tasks, uint32_t n, const char *kind_label) {
   }
 }
 
-static void maybe_advance_phase(void) {
-  if (master.job.phase == JOB_MAP && master.job.maps_done == master.job.M) {
-    LOG_INFO("master", "phase: JOB_MAP -> JOB_REDUCE (maps_done=%u/%u)",
-             master.job.maps_done, master.job.M);
-    master.job.phase = JOB_REDUCE;
-  }
-  if (master.job.phase == JOB_REDUCE &&
-      master.job.reduces_done == master.job.R) {
-    LOG_INFO("master", "phase: JOB_REDUCE -> JOB_DONE (reduces_done=%u/%u)",
-             master.job.reduces_done, master.job.R);
-    master.job.phase = JOB_DONE;
-  }
-}
 static int choose_available_task(int fd, task_kind_e kind) {
   int choosen = -1;
   assert(kind == TASK_KIND_MAP || kind == TASK_KIND_REDUCE);
@@ -340,7 +327,7 @@ static int task_done_helper(int fd, const rpc_task_done_req_t *msg) {
     task_kind_e kind = master.workers[fd].current_kind;
     /* persisting completed tasks */
     aof_append_completed(&master, msg, kind);
-    maybe_advance_phase();
+    maybe_advance_phase(&master);
   } else {
     if (phase == JOB_MAP)
       task_attempt_ended(t, ATTEMPT_FAILED, fd, master.server.now_ms, "MAP",
@@ -493,10 +480,7 @@ static int master_init_job(void) {
       return -1;
     }
 
-    master.maps[M] = (task_t){
-        .state = TASK_PENDING,
-        .owner_fd = -1,
-    };
+    task_reset_pending(&master.maps[M]);
     memcpy(master.maps[M].input_path, path, (size_t)written);
     master.maps[M].input_path[written] = '\0';
     master.maps[M].input_path_len = (uint16_t)written;
@@ -520,10 +504,7 @@ static int master_init_job(void) {
   }
 
   for (uint32_t i = 0; i < R; i++) {
-    master.reduces[i] = (task_t){
-        .state = TASK_PENDING,
-        .owner_fd = -1,
-    };
+    task_reset_pending(&master.reduces[i]);
   }
 
   master.job = (job_t){
@@ -543,31 +524,35 @@ static int master_init_job(void) {
 }
 
 static int master_bootstrap_job(void) {
-  char *aof_path = master.config.aof_path;
-  struct stat st;
-  // AOF exist and is valid
+  const char *aof_path = master.config.aof_path;
   if (mkdir("intermediate", 0755) != 0 && errno != EEXIST) {
-    LOG_ERROR("aof_init_job", "mkdir(intermediate): %s", strerror(errno));
+    LOG_ERROR("master", "mkdir(intermediate): %s", strerror(errno));
     return -1;
   }
   if (mkdir("output", 0755) != 0 && errno != EEXIST) {
-    LOG_ERROR("aof_init_job", "mkdir(output): %s", strerror(errno));
+    LOG_ERROR("master", "mkdir(output): %s", strerror(errno));
     return -1;
   }
 
-  if (stat(aof_path, &st) == 0 && st.st_size > 0) {
-    // TODO: what to do when aof_load fail? For now lets just return error;
-    if (aof_load(&master, aof_path) != -1) {
-      LOG_ERROR("master", "aof_load error");
+  struct stat st;
+  bool aof_exists = (stat(aof_path, &st) == 0 && st.st_size > 0);
+
+  if (aof_exists) {
+    if (aof_load(&master, aof_path) != 0) {
+      LOG_ERROR("master", "aof_load(%s) failed", aof_path);
       return -1;
     }
   } else {
-    if (master_init_job() == -1) {
-      LOG_ERROR("master", "master_init_job");
+    if (master_init_job() != 0) {
+      LOG_ERROR("master", "master_init_job failed");
       return -1;
     }
   }
-  aof_init(&master, aof_path);
+
+  if (aof_init(&master, aof_path) != 0) {
+    LOG_ERROR("master", "aof_init(%s) failed", aof_path);
+    return -1;
+  }
   return 0;
 }
 

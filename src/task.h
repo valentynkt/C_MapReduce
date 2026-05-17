@@ -76,6 +76,19 @@ typedef struct {
   attempt_record_t history[MAX_ATTEMPTS];
 } task_t;
 
+/* Reset a task slot to its fresh-PENDING shape.
+
+   Used by both fresh init (master_init_job) and AOF replay (aof_load) as the
+   canonical "uncompleted slot" baseline. After this call, a slot is in the
+   exact state the scheduler expects for an unassigned task; callers may then
+   overlay map-only fields (input_path) or state transitions (COMPLETED). */
+static inline void task_reset_pending(task_t *t) {
+  *t = (task_t){
+      .state = TASK_PENDING,
+      .owner_fd = -1,
+  };
+}
+
 /* ----- Job phase ----- */
 
 /* Drives the master's GetTask scheduling decision. */

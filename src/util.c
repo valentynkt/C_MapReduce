@@ -1,4 +1,6 @@
 #include "util.h"
+#include "log.h"
+#include "master.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -94,4 +96,18 @@ int open_aof(const char *path) {
     return -1;
   }
   return fd;
+}
+
+void maybe_advance_phase(master_t *master) {
+  if (master->job.phase == JOB_MAP && master->job.maps_done == master->job.M) {
+    LOG_INFO("master", "phase: JOB_MAP -> JOB_REDUCE (maps_done=%u/%u)",
+             master->job.maps_done, master->job.M);
+    master->job.phase = JOB_REDUCE;
+  }
+  if (master->job.phase == JOB_REDUCE &&
+      master->job.reduces_done == master->job.R) {
+    LOG_INFO("master", "phase: JOB_REDUCE -> JOB_DONE (reduces_done=%u/%u)",
+             master->job.reduces_done, master->job.R);
+    master->job.phase = JOB_DONE;
+  }
 }

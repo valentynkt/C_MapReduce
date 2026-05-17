@@ -76,7 +76,7 @@ int el_run(event_loop_t *el) {
 
   while (!el->stop) {
     if (el->before_sleep_proc) {
-      el->before_sleep_proc(el);
+      // el->before_sleep_proc(el);
     }
 
     struct timespec timeout;

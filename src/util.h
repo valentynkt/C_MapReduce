@@ -1,6 +1,7 @@
 #ifndef UTIL_H
 #define UTIL_H
 
+#include "master.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
@@ -21,5 +22,7 @@ int64_t now_ms(void);
 int64_t realtime_ms(void);
 
 int durable_flush(int fd);
+
+void maybe_advance_phase(master_t *master);
 
 #endif

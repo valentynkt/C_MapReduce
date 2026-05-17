@@ -204,6 +204,7 @@ int main(int argc, char *argv[]) {
       rpc_task_map_resp_t map = resp.as.map;
       LOG_INFO("worker", "got MAP task=%u attempt=%u n_reduce=%u input=%s",
                map.task_id, map.attempt_id, map.n_reduce, map.input_path);
+      sleep(5); /* DEBUG: simulate slow work to widen crash-recovery test window */
       int64_t t0 = now_ms();
       int rv = worker_map_run(map.task_id, map.attempt_id, map.n_reduce,
                               map.input_path, emit_word_count);
@@ -222,6 +223,7 @@ int main(int argc, char *argv[]) {
       rpc_task_reduce_resp_t reduce = resp.as.reduce;
       LOG_INFO("worker", "got REDUCE task=%u attempt=%u n_map=%u",
                reduce.task_id, reduce.attempt_id, reduce.n_map);
+      sleep(5); /* DEBUG: simulate slow work to widen crash-recovery test window */
       int64_t t0 = now_ms();
       int rv = worker_reduce_run(reduce.task_id, reduce.attempt_id,
                                  reduce.n_map, fold_word_count);

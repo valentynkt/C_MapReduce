@@ -11,7 +11,7 @@
    │ 8B magic   │ 4B ver  │ 4B flag │ 8B created_ms │ 8B header CRC│
    └────────────┴─────────┴─────────┴───────────────┴──────────────┘
    header CRC64 covers bytes 0..23. All multi-byte fields big-endian. */
-#define AOF_FILE_MAGIC "BYTEKVAF"
+#define AOF_FILE_MAGIC "MAPREDUC"
 #define AOF_FILE_MAGIC_LEN 8
 #define AOF_FILE_VERSION 1
 #define AOF_FILE_VERSION_LEN 4

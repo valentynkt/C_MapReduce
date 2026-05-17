@@ -94,13 +94,18 @@ static int aof_read_file_header(int fd) {
   }
   return 0;
 }
-/* TODO: read record */
+/* Returns:
+     0  → record read into *out
+     1  → clean EOF (no more records, not an error)
+    -1  → torn record, CRC mismatch, or I/O error */
 static int aof_read_record(int fd, rpc_task_done_req_t *out,
                            task_kind_e *kind) {
   uint8_t rec[AOF_RECORD_SIZE];
   ssize_t n = read_exact(fd, (char *)rec, AOF_RECORD_SIZE);
+  if (n == 0)
+    return 1; /* clean EOF — last record was complete */
   if (n != AOF_RECORD_SIZE) {
-    LOG_ERROR("aof_read_job", "header read short (%zd of %d)", n,
+    LOG_ERROR("aof_read_record", "torn record: %zd of %d bytes", n,
               AOF_RECORD_SIZE);
     return -1;
   }
@@ -320,7 +325,7 @@ int aof_open(const char *path) {
   }
   return fd;
 }
-/* TODO: */
+
 int aof_load(master_t *master, const char *path) {
   struct stat st;
   if (stat(path, &st) == -1 || st.st_size == 0)
@@ -352,24 +357,97 @@ int aof_load(master_t *master, const char *path) {
     rc = -1;
     goto done;
   };
+  if (aof_job.M > MAX_MAP_TASKS || aof_job.R > MAX_REDUCE_TASKS) {
+    LOG_ERROR("aof_load", "M or R is over the maximum number of tasks");
+    rc = -1;
+    goto done;
+  }
+
+  master->job.M = aof_job.M;
+  master->job.R = aof_job.R;
+  master->job.task_timeout_ms = master->config.task_timeout_ms;
+
+  /* Factory pass: every slot starts PENDING with no owner. */
+
+  for (uint32_t i = 0; i < aof_job.M; i++)
+    task_reset_pending(&master->maps[i]);
+  for (uint32_t i = 0; i < aof_job.R; i++)
+    task_reset_pending(&master->reduces[i]);
+
+  /* Definition pass: walk aof_job.buf and copy each input_path into the
+     corresponding map slot. Buffer layout (already CRC-validated):
+       [0..3]   M_net
+       [4..7]   R_net
+       [8..]    M times: 2B path_len | path_len bytes
+       [end-8]  crc64
+     Start at offset 8 to skip M+R; the trailing CRC is not walked here. */
+
+  size_t paths_off = 8;
   for (uint32_t i = 0; i < aof_job.M; i++) {
-    rpc_task_done_req_t task_done;
-    task_kind_e kind;
-    if (aof_read_record(fd, &task_done, &kind) == -1) {
+    uint16_t path_len_net;
+    memcpy(&path_len_net, aof_job.buf + paths_off, sizeof(path_len_net));
+    paths_off += sizeof(path_len_net);
+    uint16_t path_len = ntohs(path_len_net);
+
+    if (path_len >= MAPREDUCE_PATH_MAX) {
+      LOG_ERROR("aof_load",
+                "path_len %u >= MAPREDUCE_PATH_MAX for map %u — corrupt",
+                path_len, i);
       rc = -1;
       goto done;
     }
-    if (kind == TASK_KIND_MAP) {
-      master->maps[i] = (task_t) {
-        .state = TASK_COMPLETED, .owner_fd = -1,
-        .current_attempt = task_done.attempt_id,
-      }
 
-    } else if (kind == TASK_KIND_REDUCE) {
-    }
-    /* TODO: something */
+    memcpy(master->maps[i].input_path, aof_job.buf + paths_off, path_len);
+    master->maps[i].input_path[path_len] = '\0';
+    master->maps[i].input_path_len = path_len;
+    paths_off += path_len;
   }
-  /* TODO: read job header, walk records, populate master state */
+
+  size_t maps_count = 0;
+  size_t reduce_count = 0;
+
+  /* Replay records until EOF. The number of records on disk is not fixed:
+     it's between 0 and (M + R), depending on how far the job got before crash.
+     EOF is the normal stop signal here, not an error. */
+  for (;;) {
+    rpc_task_done_req_t task_done;
+    task_kind_e kind;
+    int rec_rc = aof_read_record(fd, &task_done, &kind);
+    if (rec_rc == 1)
+      break; /* clean EOF — replay complete */
+    if (rec_rc == -1) {
+      rc = -1;
+      goto done;
+    }
+
+    if (kind == TASK_KIND_MAP) {
+      if (task_done.task_id >= aof_job.M) {
+        LOG_ERROR("aof_load", "MAP task_id %u out of range (M=%u)",
+                  task_done.task_id, aof_job.M);
+        rc = -1;
+        goto done;
+      }
+      master->maps[task_done.task_id].state = TASK_COMPLETED;
+      maps_count++;
+    } else if (kind == TASK_KIND_REDUCE) {
+      if (task_done.task_id >= aof_job.R) {
+        LOG_ERROR("aof_load", "REDUCE task_id %u out of range (R=%u)",
+                  task_done.task_id, aof_job.R);
+        rc = -1;
+        goto done;
+      }
+      master->reduces[task_done.task_id].state = TASK_COMPLETED;
+      reduce_count++;
+    }
+  }
+  master->job.maps_done = maps_count;
+  master->job.reduces_done = reduce_count;
+
+  LOG_INFO("aof_load",
+           "replay complete: M=%u R=%u maps_done=%zu reduces_done=%zu",
+           aof_job.M, aof_job.R, maps_count, reduce_count);
+
+  maybe_advance_phase(master);
 
 done:
   if (aof_job.buf) {
